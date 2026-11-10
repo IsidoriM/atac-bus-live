@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#080b10" />
+    <meta
+      name="description"
+      content="Mappa in tempo reale degli autobus ATAC in circolazione nel comune di Roma, basata sui dati open di Roma Mobilità."
+    />
+    <title>ATAC Bus Live · autobus in tempo reale a Roma</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23ff4d3a'/%3E%3Cpath d='M18 18h28a4 4 0 0 1 4 4v20a4 4 0 0 1-4 4h-2v4h-6v-4H26v4h-6v-4h-2a4 4 0 0 1-4-4V22a4 4 0 0 1 4-4Zm2 8v10h24V26H20Zm2 14a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm20 0a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z' fill='white'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://unpkg.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 64 64" width="26" height="26">
+            <path
+              d="M18 14h28a4 4 0 0 1 4 4v22a4 4 0 0 1-4 4h-2v6h-6v-6H26v6h-6v-6h-2a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4Zm2 8v12h24V22H20Zm2 16a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm20 0a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"
+              fill="currentColor"
+            />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>ATAC Bus Live</h1>
+          <p>autobus in circolazione · Roma</p>
+        </div>
+      </div>
+
+      <div class="live-pill" id="livePill" data-state="connecting">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="liveText">Connessione…</span>
+      </div>
+
+      <div class="topbar-stats" aria-label="Statistiche in tempo reale">
+        <div class="stat">
+          <strong id="statBuses">–</strong>
+          <span>bus</span>
+        </div>
+        <div class="stat">
+          <strong id="statLines">–</strong>
+          <span>linee</span>
+        </div>
+        <div class="stat">
+          <strong id="statMoving">–</strong>
+          <span>in movimento</span>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <span class="updated" id="updatedAt">—</span>
+        <button class="btn-icon" id="refreshBtn" type="button" title="Aggiorna i dati" aria-label="Aggiorna i dati">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar" aria-label="Elenco autobus e linee">
+        <div class="tabs" role="tablist">
+          <button class="tab is-active" data-tab="vehicles" role="tab" aria-selected="true">
+            Bus <span class="tab-count" id="tabVehicleCount">0</span>
+          </button>
+          <button class="tab" data-tab="lines" role="tab" aria-selected="false">
+            Linee <span class="tab-count" id="tabLineCount">0</span>
+          </button>
+        </div>
+
+        <div class="sidebar-tools">
+          <div class="search">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
+              <path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            <input
+              id="searchInput"
+              type="search"
+              placeholder="Cerca linea, vettura o destinazione…"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Cerca"
+            />
+            <button id="clearSearch" class="search-clear" type="button" aria-label="Cancella ricerca" hidden>×</button>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="onlyMoving" />
+            <span class="switch-track" aria-hidden="true"></span>
+            Solo in movimento
+          </label>
+        </div>
+
+        <div class="selection" id="selectionBanner" hidden>
+          <div class="selection-main">
+            <span class="line-chip" id="selLine">—</span>
+            <div class="selection-copy">
+              <strong id="selTitle">Linea</strong>
+              <span id="selSub">—</span>
+            </div>
+          </div>
+          <button class="selection-clear" id="clearSelection" type="button" aria-label="Rimuovi filtro linea">×</button>
+        </div>
+
+        <div class="list-header">
+          <span id="listTitle">Tutti gli autobus</span>
+          <span class="list-count" id="listCount">0</span>
+        </div>
+
+        <div class="list" id="list" role="list">
+          <div class="list-loading">
+            <span class="spinner" aria-hidden="true"></span>
+            Carico gli autobus ATAC…
+          </div>
+        </div>
+
+        <div class="sidebar-foot">
+          <span>Dati aperti <strong>Roma Mobilità</strong> · GTFS‑Realtime</span>
+          <span id="footCount"></span>
+        </div>
+      </aside>
+
+      <section class="map-wrap" aria-label="Mappa degli autobus">
+        <div id="map"></div>
+
+        <div class="map-toolbar">
+          <button class="btn" id="fitBtn" type="button">
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+              <path
+                d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            Inquadra tutti
+          </button>
+          <button class="btn" id="toggleShape" type="button" hidden>
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+              <path
+                d="M5 19c4-1 5-6 9-7s4-4 5-7"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+              <circle cx="5" cy="19" r="2" fill="currentColor" />
+              <circle cx="19" cy="5" r="2" fill="currentColor" />
+            </svg>
+            <span id="toggleShapeText">Nascondi percorso</span>
+          </button>
+        </div>
+
+        <div class="legend">
+          <span class="legend-dot" aria-hidden="true"></span>
+          <span>autobus ATAC · il colore indica la linea</span>
+        </div>
+
+        <div class="map-status" id="mapStatus">—</div>
+
+        <div class="loading" id="loading">
+          <span class="spinner spinner-lg" aria-hidden="true"></span>
+          <p>Carico gli autobus ATAC in circolazione…</p>
+          <small>Connessione ai dati aperti di Roma Mobilità</small>
+        </div>
+
+        <div class="toast" id="toast" role="status" hidden></div>
+      </section>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -49,8 +49,10 @@ venv/
 *.egg-info/
 
 # --- File temporanei / dati scaricati ---
+.cache/
 .tmp*
 *.zip
+
 rtvp.pb
 *.tmp
 *.bak
