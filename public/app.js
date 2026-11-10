@@ -52,7 +52,7 @@ const el = {
   locateBtn: $('locateBtn'),
   clearLocation: $('clearLocation'),
   currentPositionField: $('currentPositionField'),
-  currentPositionInput: $('currentPositionInput'),
+  currentPositionValue: $('currentPositionValue'),
   currentPositionBtn: $('currentPositionBtn'),
   currentPositionBadge: $('currentPositionBadge'),
   currentPositionCoords: $('currentPositionCoords'),
@@ -518,7 +518,7 @@ function describePlace(feature) {
  * `gpsState`: idle | locating | ready | denied | unavailable | timeout
  */
 function renderCurrentPosition() {
-  if (!el.currentPositionInput) return;
+  if (!el.currentPositionValue) return;
 
   const states = {
     idle: 'non rilevata',
@@ -534,7 +534,8 @@ function renderCurrentPosition() {
 
   const gps = state.gps;
   if (gps) {
-    el.currentPositionInput.value = gps.label || `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`;
+    el.currentPositionValue.textContent =
+      gps.label || `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`;
     el.currentPositionField.classList.add('is-located');
     el.currentPositionCoords.textContent =
       `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}` +
@@ -550,13 +551,10 @@ function renderCurrentPosition() {
     } else {
       el.currentPositionPlace.hidden = true;
     }
-  } else if (state.gpsState === 'locating') {
-    el.currentPositionInput.value = 'Rilevo la posizione…';
-    el.currentPositionField.classList.remove('is-located');
-    el.currentPositionCoords.textContent = '';
-    el.currentPositionPlace.hidden = true;
   } else {
-    el.currentPositionInput.value = 'Posizione non rilevata';
+    // Senza posizione non mostriamo nessun testo: restano solo il pulsante di
+    // rilevamento e il badge di stato.
+    el.currentPositionValue.textContent = '';
     el.currentPositionField.classList.remove('is-located');
     el.currentPositionCoords.textContent = '';
     el.currentPositionPlace.hidden = true;
@@ -1602,8 +1600,10 @@ function bindEvents() {
   el.locateBtn.addEventListener('click', locateMe);
 
   el.currentPositionBtn.addEventListener('click', () => detectCurrentPosition());
-  el.currentPositionInput.addEventListener('click', () => detectCurrentPosition());
-  el.currentPositionInput.addEventListener('focus', () => el.currentPositionInput.blur());
+  el.currentPositionField.addEventListener('click', (event) => {
+    if (event.target.closest('button')) return;
+    detectCurrentPosition();
+  });
   el.clearLocation.addEventListener('click', () => {
     clearLocation();
     el.locationInput.focus();
