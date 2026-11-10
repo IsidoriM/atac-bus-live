@@ -33,6 +33,8 @@ const state = {
   mapStyle: 'osm',
   route: null,
   routeStops: [],
+  tripOptions: [],
+  tripMode: null,
   tripOpen: false,
 };
 
@@ -67,6 +69,7 @@ const el = {
   tripDistance: $('tripDistance'),
   tripDuration: $('tripDuration'),
   tripArrival: $('tripArrival'),
+  tripOptions: $('tripOptions'),
   tripSteps: $('tripSteps'),
   tripBuses: $('tripBuses'),
   tripNote: $('tripNote'),
@@ -1423,6 +1426,7 @@ function clearRoute({ keepSummary = false } = {}) {
   routeController = null;
   state.route = null;
   state.routeStops = [];
+  state.tripOptions = [];
   ensureRouteLayer().clearLayers();
   if (!keepSummary) renderRouteSummary();
   if (state.tripOpen) closeTripReport();
@@ -1445,7 +1449,7 @@ async function drawRoute({ fit = true } = {}) {
 
   const url =
     `${ROUTER_ENDPOINT}/${from.lon},${from.lat};${to.lon},${to.lat}` +
-    '?overview=full&geometries=geojson';
+    '?overview=full&geometries=geojson&steps=true';
 
   try {
     const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
@@ -1487,6 +1491,14 @@ async function drawRoute({ fit = true } = {}) {
       from: { lat: from.lat, lon: from.lon },
       to: { lat: to.lat, lon: to.lon },
       points,
+      // Indicazioni passo-passo restituite dal router (per il report di viaggio).
+      steps: (best.legs?.[0]?.steps || []).map((step) => ({
+        name: step.name || '',
+        distance: step.distance,
+        duration: step.duration,
+        type: step.maneuver?.type || '',
+        modifier: step.maneuver?.modifier || '',
+      })),
     };
     renderRouteSummary();
 
@@ -1505,7 +1517,13 @@ async function drawRoute({ fit = true } = {}) {
   }
 }
 
-/* ---------- report del percorso ---------- */
+/* ---------- report di viaggio (stile Moovit) ---------- */
+
+const TRIP_MODE_KEY = 'atac-bus-live.trip-mode';
+const BUS_WAIT_BUFFER_MIN = 2;
+const BUS_SPEED_KMH = 18;
+const BUS_DWELL_MIN = 1;
+const MAX_TRIP_OPTIONS = 3;
 
 /**
  * Fermate ATAC entro ~220 m dalla polilinea del tragitto: sono i punti di
@@ -1540,67 +1558,17 @@ async function findStopsAlongRoute(points) {
     }),
   );
 
-  return [...found.values()]
-    .sort((a, b) => a.alongDistance - b.alongDistance)
-    .slice(0, 4);
+  return [...found.values()].sort((a, b) => a.alongDistance - b.alongDistance);
 }
 
-/** Righe del report: partenza, fermate utili, arrivo. */
-function renderTripSteps() {
-  const route = state.route;
-  if (!route) {
-    el.tripSteps.innerHTML = '';
-    return;
-  }
-
-  const dest = destinationLabel();
-  const stops = state.routeStops || [];
-
-  const steps = [];
-  steps.push(`
-    <li class="trip-step" data-kind="start">
-      <span class="trip-step-icon" aria-hidden="true">A</span>
-      <span class="trip-step-main">
-        <strong>Parti da ${esc(dest)}</strong>
-        <span>${esc(formatDistance(route.distance))} a piedi fino alla posizione attuale</span>
-      </span>
-    </li>`);
-
-  for (const stop of stops) {
-    const lines = (stop.lines || []).slice(0, 3);
-    steps.push(`
-      <li class="trip-step" data-kind="stop">
-        <span class="trip-step-icon" aria-hidden="true">·</span>
-        <span class="trip-step-main">
-          <strong>Fermata ${esc(stop.name)}</strong>
-          <span>${esc(formatDistance(stop.alongDistance))} dal percorso${
-            lines.length ? ` · ${lines.map((l) => esc(l.line)).join(' · ')}` : ''
-          }</span>
-        </span>
-      </li>`);
-  }
-
-  steps.push(`
-    <li class="trip-step" data-kind="end">
-      <span class="trip-step-icon" aria-hidden="true">B</span>
-      <span class="trip-step-main">
-        <strong>Arrivi alla tua posizione</strong>
-        <span>${esc(state.gps?.label || state.location?.label || 'Posizione attuale')}</span>
-      </span>
-    </li>`);
-
-  el.tripSteps.innerHTML = steps.join('');
-}
-
-/** Elenco delle linee che passano dalle fermate lungo il percorso. */
-function renderTripBuses() {
-  const stops = state.routeStops || [];
+/** Fermate lungo il tragitto con almeno una linea in circolazione. */
+function linesAlongRoute(stops) {
   const byRoute = new Map();
 
-  for (const stop of stops) {
+  for (const stop of stops || []) {
     for (const line of stop.lines || []) {
-      const current = byRoute.get(line.routeId);
       const wait = Number.isFinite(line.waitMinutes) ? line.waitMinutes : null;
+      const current = byRoute.get(line.routeId);
       if (!current) {
         byRoute.set(line.routeId, {
           routeId: line.routeId,
@@ -1621,14 +1589,224 @@ function renderTripBuses() {
     }
   }
 
-  const lines = [...byRoute.values()]
-    .sort((a, b) => {
-      const wa = a.waitMinutes ?? Infinity;
-      const wb = b.waitMinutes ?? Infinity;
-      if (wa !== wb) return wa - wb;
-      return compareLines(a.line, b.line);
+  return [...byRoute.values()].sort((a, b) => {
+    const wa = a.waitMinutes ?? Infinity;
+    const wb = b.waitMinutes ?? Infinity;
+    if (wa !== wb) return wa - wb;
+    return compareLines(a.line, b.line);
+  });
+}
+
+function tripMinutes(seconds) {
+  return Number.isFinite(seconds) ? Math.max(1, Math.round(seconds / 60)) : 0;
+}
+
+/**
+ * Costruisce le alternative di viaggio confrontabili, come le schede di Moovit:
+ * a piedi, bus diretto, bus + a piedi e, se serve, un trasbordo.
+ */
+function buildTripOptions(route, stops) {
+  const walkMinutes = tripMinutes(route.duration);
+  const dest = destinationLabel();
+  const here = state.gps?.label || state.location?.label || 'Posizione attuale';
+  const lines = linesAlongRoute(stops).filter((l) => l.activeBuses > 0 || l.waitMinutes !== null);
+
+  const options = [
+    {
+      id: 'walk',
+      mode: 'walk',
+      title: 'A piedi',
+      lines: [],
+      minutes: walkMinutes,
+      arriveAt: Date.now() + (route.duration || 0) * 1000,
+      distance: route.distance,
+      summary: `${formatDistance(route.distance)} a piedi da ${dest} a ${here}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `Cammina da ${dest}`,
+          detail: `${formatDistance(route.distance)} · ${formatDuration(route.duration)}`,
+        },
+      ],
+    },
+  ];
+
+  const walkToStop = Math.max(1, Math.round((stops[0]?.alongDistance || 150) / 80));
+  const busLine = lines[0];
+  // Valori di riferimento per il trasbordo (o se non c'è una prima linea).
+  const wait = busLine && Number.isFinite(busLine.waitMinutes)
+    ? Math.max(0, busLine.waitMinutes)
+    : BUS_WAIT_BUFFER_MIN;
+  const rideMinutes = Math.max(
+    2,
+    Math.round((route.distance / 1000 / BUS_SPEED_KMH) * 60) + BUS_DWELL_MIN,
+  );
+
+  if (busLine) {
+    options.push({
+      id: `bus-${busLine.routeId}`,
+      mode: 'bus',
+      title: `Bus ${busLine.line}`,
+      lines: [busLine],
+      minutes: walkToStop + wait + rideMinutes,
+      arriveAt: Date.now() + (walkToStop + wait + rideMinutes) * 60_000,
+      distance: route.distance,
+      summary: `Fermata ${busLine.stopName} · ${busLine.headsign || 'linea ' + busLine.line}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `A piedi fino alla fermata ${busLine.stopName}`,
+          detail: `${walkToStop} min · ${formatDistance(stops[0]?.alongDistance || 150)}`,
+        },
+        {
+          kind: 'bus',
+          label: `Bus ${busLine.line} → ${busLine.headsign || 'destinazione'}`,
+          detail: `attesa ${formatWait(wait)} · ${busLine.activeBuses} in linea`,
+          routeId: busLine.routeId,
+          line: busLine.line,
+        },
+        {
+          kind: 'walk',
+          label: 'Scendi e raggiungi la posizione attuale',
+          detail: '1 min a piedi',
+        },
+      ],
+    });
+  }
+
+  // Trasbordo: una seconda linea che passa da un'altra fermata del percorso.
+  const transfer = lines.find((l) => l.routeId !== busLine?.routeId && l.stopName !== busLine?.stopName);
+  if (busLine && transfer) {
+    const wait2 = Number.isFinite(transfer.waitMinutes) ? Math.max(1, transfer.waitMinutes) : BUS_WAIT_BUFFER_MIN + 1;
+    const ride2 = Math.max(2, Math.round((route.distance / 1000 / BUS_SPEED_KMH) * 45));
+    options.push({
+      id: `bus-${busLine.routeId}-${transfer.routeId}`,
+      mode: 'bus',
+      title: `Bus ${busLine.line} + ${transfer.line}`,
+      lines: [busLine, transfer],
+      minutes: walkToStop + wait + ride2 + wait2 + BUS_DWELL_MIN,
+      arriveAt: Date.now() + (walkToStop + wait + ride2 + wait2 + BUS_DWELL_MIN) * 60_000,
+      distance: route.distance,
+      summary: `Cambio a ${transfer.stopName} · ${transfer.headsign || 'linea ' + transfer.line}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `A piedi fino alla fermata ${busLine.stopName}`,
+          detail: `${walkToStop} min`,
+        },
+        {
+          kind: 'bus',
+          label: `Bus ${busLine.line} → ${busLine.headsign || 'destinazione'}`,
+          detail: `attesa ${formatWait(wait)}`,
+          routeId: busLine.routeId,
+          line: busLine.line,
+        },
+        {
+          kind: 'bus',
+          label: `Cambio: bus ${transfer.line} → ${transfer.headsign || 'destinazione'}`,
+          detail: `a ${transfer.stopName} · attesa ${formatWait(wait2)}`,
+          routeId: transfer.routeId,
+          line: transfer.line,
+        },
+        {
+          kind: 'walk',
+          label: 'Scendi e raggiungi la posizione attuale',
+          detail: '1 min a piedi',
+        },
+      ],
+    });
+  }
+
+  return options
+    .sort((a, b) => a.minutes - b.minutes)
+    .slice(0, MAX_TRIP_OPTIONS)
+    .map((option, index) => ({ ...option, best: index === 0 }));
+}
+
+function loadSavedTripMode() {
+  try {
+    const saved = localStorage.getItem(TRIP_MODE_KEY);
+    if (saved) state.tripMode = saved;
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+function saveTripMode(mode) {
+  try {
+    localStorage.setItem(TRIP_MODE_KEY, mode);
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+/** Schede con le alternative di viaggio (a piedi, bus, trasbordo). */
+function renderTripOptions() {
+  const options = state.tripOptions || [];
+  if (!options.length) {
+    el.tripOptions.innerHTML = '';
+    return;
+  }
+
+  if (!options.some((o) => o.id === state.tripMode)) state.tripMode = options[0].id;
+
+  el.tripOptions.innerHTML = options
+    .map((option) => {
+      const active = option.id === state.tripMode;
+      const chips = option.lines
+        .map((l) => `<span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>`)
+        .join('');
+      return `
+        <button class="trip-option${active ? ' is-active' : ''}" type="button"
+          data-trip-option="${esc(option.id)}" aria-pressed="${active}">
+          <span class="trip-option-main">
+            <span class="trip-option-title">
+              ${chips || '<span class="trip-option-walk-icon" aria-hidden="true">🚶</span>'}
+              <span>${esc(option.title)}</span>
+              ${option.best ? '<span class="trip-best">migliore</span>' : ''}
+            </span>
+            <span class="trip-option-sub">${esc(option.summary)}</span>
+          </span>
+          <span class="trip-option-time">
+            <strong>${option.minutes} min</strong>
+            <span>${timeRome(new Date(option.arriveAt)).slice(0, 5)}</span>
+          </span>
+        </button>`;
     })
-    .slice(0, 6);
+    .join('');
+
+  renderTripLegs();
+}
+
+/** Tappe dell'alternativa selezionata. */
+function renderTripLegs() {
+  const option = (state.tripOptions || []).find((o) => o.id === state.tripMode);
+  if (!option) {
+    el.tripSteps.innerHTML = '';
+    return;
+  }
+
+  el.tripSteps.innerHTML = option.legs
+    .map((leg) => {
+      const isBus = leg.kind === 'bus';
+      const icon = isBus
+        ? `<span class="line-chip" style="${chipStyle(leg.line || '')}">${esc(leg.line || 'bus')}</span>`
+        : '<span class="trip-step-walk" aria-hidden="true">🚶</span>';
+      return `
+        <li class="trip-step" data-kind="${esc(leg.kind)}">
+          <span class="trip-step-icon">${icon}</span>
+          <span class="trip-step-main">
+            <strong>${esc(leg.label)}</strong>
+            <span>${esc(leg.detail || '')}</span>
+          </span>
+        </li>`;
+    })
+    .join('');
+}
+
+/** Elenco delle linee disponibili vicino al percorso (sotto le tappe). */
+function renderTripBuses() {
+  const lines = linesAlongRoute(state.routeStops).slice(0, 6);
 
   if (!lines.length) {
     el.tripBuses.innerHTML =
@@ -1654,7 +1832,18 @@ function renderTripBuses() {
     .join('');
 }
 
-/** Apre il pannello con il report completo del percorso. */
+/** Riepilogo numerico dell'alternativa scelta. */
+function renderTripStats() {
+  const route = state.route;
+  const option = (state.tripOptions || []).find((o) => o.id === state.tripMode);
+  if (!route || !option) return;
+
+  el.tripDistance.textContent = formatDistance(option.distance || route.distance) || '—';
+  el.tripDuration.textContent = `${option.minutes} min`;
+  el.tripArrival.textContent = timeRome(new Date(option.arriveAt)).slice(0, 5);
+}
+
+/** Apre il pannello con il report di viaggio completo. */
 async function openTripReport() {
   const route = state.route;
   if (!route) {
@@ -1666,19 +1855,43 @@ async function openTripReport() {
   el.tripReport.hidden = false;
   el.routeOpen?.classList.add('is-active');
 
-  const arrival = new Date(Date.now() + (route.duration || 0) * 1000);
   el.tripRoute.textContent = `${destinationLabel()} → ${state.gps?.label || state.location?.label || 'posizione attuale'}`;
-  el.tripDistance.textContent = formatDistance(route.distance) || '—';
-  el.tripDuration.textContent = formatDuration(route.duration) || '—';
-  el.tripArrival.textContent = timeRome(arrival).slice(0, 5);
   el.tripNote.textContent = `Calcolato alle ${timeRome()}`;
-  renderTripSteps();
+  el.tripOptions.innerHTML = '<span class="trip-empty">Calcolo le alternative…</span>';
+  el.tripSteps.innerHTML = '';
   el.tripBuses.innerHTML = '<span class="trip-empty">Cerco le linee che passano di qui…</span>';
+
+  // Prima le tappe a piedi dal router, così il report è subito utile.
+  state.tripOptions = [
+    {
+      id: 'walk',
+      mode: 'walk',
+      title: 'A piedi',
+      lines: [],
+      minutes: tripMinutes(route.duration),
+      arriveAt: Date.now() + (route.duration || 0) * 1000,
+      distance: route.distance,
+      summary: `${formatDistance(route.distance)} a piedi fino a ${state.gps?.label || 'posizione attuale'}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `Cammina da ${destinationLabel()}`,
+          detail: `${formatDistance(route.distance)} · ${formatDuration(route.duration)}`,
+        },
+      ],
+    },
+  ];
+  if (!state.tripMode) state.tripMode = 'walk';
+  renderTripOptions();
+  renderTripStats();
 
   const stops = await findStopsAlongRoute(route.points || []);
   if (!state.tripOpen || state.route !== route) return;
+
   state.routeStops = stops;
-  renderTripSteps();
+  state.tripOptions = buildTripOptions(route, stops);
+  renderTripOptions();
+  renderTripStats();
   renderTripBuses();
 }
 
@@ -2195,6 +2408,15 @@ function bindEvents() {
     else openTripReport();
   });
 
+  el.tripOptions?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-trip-option]');
+    if (!button) return;
+    state.tripMode = button.dataset.tripOption;
+    saveTripMode(state.tripMode);
+    renderTripOptions();
+    renderTripStats();
+  });
+
   el.tripClose?.addEventListener('click', closeTripReport);
 
   el.tripCenter?.addEventListener('click', () => {
@@ -2320,6 +2542,7 @@ async function boot() {
   initMap();
   bindEvents();
   loadSavedRadius();
+  loadSavedTripMode();
   syncTabs();
   setInterval(tick, 1000);
   tick();

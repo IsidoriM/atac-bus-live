@@ -2185,3 +2185,130 @@ html[data-map-style='voyager'] .map-status strong {
     max-height: 62%;
   }
 }
+
+/* ---------- Alternative di viaggio (report stile Moovit) ---------- */
+
+.trip-options {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.trip-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 11px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel-2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.trip-option:hover {
+  background: var(--panel-3);
+}
+
+.trip-option.is-active {
+  border-color: rgba(47, 107, 255, 0.55);
+  background: rgba(47, 107, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.25);
+}
+
+.trip-option-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trip-option-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+}
+
+.trip-option-title > span:last-of-type {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trip-option-title .line-chip {
+  height: 20px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  border-radius: 6px;
+}
+
+.trip-option-walk-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.trip-best {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(56, 212, 127, 0.16);
+  border: 1px solid rgba(56, 212, 127, 0.4);
+  color: #74e5a9;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.trip-option-sub {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trip-option-time {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  flex: none;
+}
+
+.trip-option-time strong {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.trip-option-time span {
+  font-size: 10px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.trip-step-walk {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.trip-step[data-kind='bus'] .trip-step-icon {
+  background: transparent;
+}
+
+.trip-step[data-kind='bus'] .trip-step-icon .line-chip {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  font-size: 10px;
+  border-radius: 6px;
+}
