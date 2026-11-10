@@ -18,6 +18,29 @@ const state = {
   nextRefreshAt: 0,
   shapes: new Map(),
   shapesVisible: true,
+  location: null,
+  destination: null,
+  gps: null,
+  gpsState: 'idle',
+  stops: [],
+  stopsAt: null,
+  stopsRadius: 500,
+  stopsLoading: false,
+  stopsError: null,
+  stopsSchedule: null,
+  selectedStopId: null,
+  stopMarkers: new Map(),
+  mapStyle: 'osm',
+  route: null,
+  routeStops: [],
+  tripOptions: [],
+  tripMode: null,
+  tripOpen: false,
+  tripViewOpen: false,
+  tripTransport: 'transit',
+  tripMap: null,
+  tripRouteLayer: null,
+  tripPointLayer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -32,8 +55,46 @@ const el = {
   refreshBtn: $('refreshBtn'),
   tabVehicleCount: $('tabVehicleCount'),
   tabLineCount: $('tabLineCount'),
+  tabStopCount: $('tabStopCount'),
   search: $('searchInput'),
   clearSearch: $('clearSearch'),
+  locationField: $('locationField'),
+  locationInput: $('locationInput'),
+  locationSuggestions: $('locationSuggestions'),
+  locateBtn: $('locateBtn'),
+  clearLocation: $('clearLocation'),
+  currentPositionField: $('currentPositionField'),
+  currentPositionValue: $('currentPositionValue'),
+  currentPositionBtn: $('currentPositionBtn'),
+  currentPositionBadge: $('currentPositionBadge'),
+  currentPositionCoords: $('currentPositionCoords'),
+  routeOpen: $('routeOpen'),
+  tripReport: $('tripReport'),
+  tripRoute: $('tripRoute'),
+  tripDistance: $('tripDistance'),
+  tripDuration: $('tripDuration'),
+  tripArrival: $('tripArrival'),
+  tripView: $('tripView'),
+  tripFromInput: $('tripFromInput'),
+  tripToInput: $('tripToInput'),
+  tripBack: $('tripBack'),
+  tripViewClose: $('tripViewClose'),
+  tripMapEl: $('tripMap'),
+  tripMapTitle: $('tripMapTitle'),
+  tripFit: $('tripFit'),
+  tripDirections: $('tripDirections'),
+  tripOptions: $('tripOptions'),
+  tripSteps: $('tripSteps'),
+  tripBuses: $('tripBuses'),
+  tripNote: $('tripNote'),
+  tripClose: $('tripClose'),
+  tripCenter: $('tripCenter'),
+  routeSummary: $('routeSummary'),
+  routeText: $('routeText'),
+  routeClear: $('routeClear'),
+  currentPositionPlace: $('currentPositionPlace'),
+  currentPositionPlaceName: $('currentPositionPlaceName'),
+  currentPositionPlaceDetail: $('currentPositionPlaceDetail'),
   onlyMoving: $('onlyMoving'),
   selectionBanner: $('selectionBanner'),
   selLine: $('selLine'),
@@ -45,6 +106,8 @@ const el = {
   list: $('list'),
   footCount: $('footCount'),
   fitBtn: $('fitBtn'),
+  nearbyBtn: $('nearbyBtn'),
+  mapStyle: document.querySelector('.map-style'),
   toggleShape: $('toggleShape'),
   toggleShapeText: $('toggleShapeText'),
   mapStatus: $('mapStatus'),
@@ -144,6 +207,125 @@ let markers = new Map();
 let markerLayer = null;
 let shapeLayer = null;
 
+const MAP_STYLE_KEY = 'atac-bus-live.map-style';
+
+const MAP_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>';
+
+/**
+ * Stili della mappa.
+ * - `osm` (predefinito): tile standard OpenStreetMap, mappa stradale chiara
+ *   senza watermark.
+ * - `voyager`: CARTO Voyager, resa ancora più vicina a una mappa stradale
+ *   commerciale (richiede una chiave CARTO per l'uso senza watermark).
+ * - `satellite`: foto aeree Esri con etichette CARTO.
+ * - `dark`: mappa notturna.
+ */
+const MAP_STYLES = {
+  osm: {
+    label: 'Stradale',
+    layers: [
+      {
+        url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        options: {
+          maxZoom: 19,
+          attribution: `${MAP_ATTRIBUTION} contributors`,
+        },
+      },
+    ],
+  },
+  voyager: {
+    label: 'Stradale+',
+    layers: [
+      {
+        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        options: {
+          subdomains: 'abcd',
+          maxZoom: 20,
+          attribution: `${MAP_ATTRIBUTION} &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>`,
+        },
+      },
+    ],
+  },
+  satellite: {
+    label: 'Satellite',
+    layers: [
+      {
+        url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        options: {
+          maxZoom: 19,
+          attribution: `Foto aeree &copy; <a href="https://www.esri.com/" target="_blank" rel="noreferrer">Esri</a>, Maxar, Earthstar Geographics · ${MAP_ATTRIBUTION}`,
+        },
+      },
+      {
+        // Etichette e nomi delle strade sopra le foto aeree.
+        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png',
+        options: {
+          subdomains: 'abcd',
+          maxZoom: 20,
+          attribution: '&copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>',
+        },
+      },
+    ],
+  },
+  dark: {
+    label: 'Scura',
+    layers: [
+      {
+        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        options: {
+          subdomains: 'abcd',
+          maxZoom: 20,
+          attribution: `${MAP_ATTRIBUTION} &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>`,
+        },
+      },
+    ],
+  },
+};
+
+let tileLayers = [];
+
+function loadSavedMapStyle() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(MAP_STYLE_KEY);
+  } catch {
+    saved = null;
+  }
+  state.mapStyle = saved && MAP_STYLES[saved] ? saved : 'osm';
+}
+
+function saveMapStyle(style) {
+  try {
+    localStorage.setItem(MAP_STYLE_KEY, style);
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+/** Sostituisce i tile della mappa con quelli dello stile richiesto. */
+function applyMapStyle(style, { save = true } = {}) {
+  const config = MAP_STYLES[style] ? style : 'osm';
+  state.mapStyle = config;
+  if (save) saveMapStyle(config);
+  if (!map) return;
+
+  for (const layer of tileLayers) layer.remove();
+  tileLayers = MAP_STYLES[config].layers.map(({ url, options }) =>
+    L.tileLayer(url, { ...options, detectRetina: false }).addTo(map),
+  );
+
+  // I tile nuovi vanno sotto marker e tracciati.
+  for (const layer of tileLayers) layer.bringToBack();
+
+  document.documentElement.dataset.mapStyle = config;
+  document.querySelectorAll('.map-style-btn').forEach((button) => {
+    const active = button.dataset.style === config;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
 function initMap() {
   markerLayer = L.layerGroup();
   shapeLayer = L.layerGroup();
@@ -152,16 +334,12 @@ function initMap() {
     zoomControl: false,
     preferCanvas: true,
     minZoom: 10,
-    maxZoom: 18,
+    maxZoom: 20,
     attributionControl: true,
   }).setView([41.9, 12.51], 12);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 20,
-  }).addTo(map);
+  loadSavedMapStyle();
+  applyMapStyle(state.mapStyle, { save: false });
 
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
@@ -284,6 +462,1667 @@ function fitShape(routeId) {
   if (!points.length) return false;
   map.fitBounds(L.latLngBounds(points), { padding: [56, 56], maxZoom: 15 });
   return true;
+}
+
+/* ---------- location search ---------- */
+
+const GEOCODE_ENDPOINT = 'https://photon.komoot.io/api/';
+const ROME_CENTER = { lat: 41.9028, lon: 12.4964 };
+const ROME_BBOX = '11.9,41.6,12.9,42.1';
+const LOCATION_STORAGE_KEY = 'atac-bus-live.location';
+
+let locationMarker = null;
+let suggestionTimer = null;
+let suggestionController = null;
+let suggestions = [];
+let activeSuggestion = -1;
+
+function haversine(a, b) {
+  const radius = 6_371_000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * radius * Math.asin(Math.sqrt(h));
+}
+
+function formatDistance(meters) {
+  if (!Number.isFinite(meters)) return '';
+  if (meters < 950) return `${Math.max(10, Math.round(meters / 10) * 10)} m`;
+  return `${(meters / 1000).toFixed(1).replace('.', ',')} km`;
+}
+
+function formatWait(minutes) {
+  if (!Number.isFinite(minutes)) return '';
+  if (minutes <= 0) return 'in arrivo';
+  if (minutes === 1) return '1 min';
+  return `${minutes} min`;
+}
+
+function placeFromFeature(feature) {
+  const p = feature?.properties || {};
+  const coords = feature?.geometry?.coordinates;
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+
+  const lat = Number(coords[1]);
+  const lon = Number(coords[0]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const street = [p.street, p.housenumber].filter(Boolean).join(' ');
+  const title = [p.name, p.housenumber].filter(Boolean).join(' ') || street || p.city || 'Luogo';
+  const detailParts = [];
+  if (street && street !== title) detailParts.push(street);
+  if (p.city && p.city !== title) detailParts.push(p.city);
+  if (p.postcode) detailParts.push(p.postcode);
+
+  return {
+    lat,
+    lon,
+    title,
+    street: p.street || (p.osm_key === 'highway' ? p.name : '') || '',
+    detail: detailParts.join(' · '),
+    // "Via Nazionale, Roma": il nome da solo basta se è già una via.
+    label: [title, p.city && p.city !== title ? p.city : ''].filter(Boolean).join(', '),
+  };
+}
+
+/** Scarta i risultati ripetuti (stesso nome e coordinate quasi identiche). */
+function dedupePlaces(places) {
+  const seen = new Set();
+  const out = [];
+  for (const place of places) {
+    const key = `${normalize(place.title)}|${place.lat.toFixed(3)}|${place.lon.toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(place);
+  }
+  return out;
+}
+
+function closeSuggestions() {
+  el.locationSuggestions.hidden = true;
+  el.locationInput.setAttribute('aria-expanded', 'false');
+  el.locationInput.removeAttribute('aria-activedescendant');
+  activeSuggestion = -1;
+}
+
+function renderSuggestions() {
+  if (!suggestions.length) {
+    el.locationSuggestions.innerHTML = '<div class="location-empty">Nessun risultato</div>';
+  } else {
+    el.locationSuggestions.innerHTML = suggestions
+      .map(
+        (place, index) => `
+        <button class="location-suggestion${index === activeSuggestion ? ' is-active' : ''}" type="button"
+          role="option" id="loc-opt-${index}" data-index="${index}"
+          aria-selected="${index === activeSuggestion}">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
+              fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            <circle cx="12" cy="10" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/>
+          </svg>
+          <span class="loc-main">
+            <span class="loc-title">${esc(place.title)}</span>
+            ${place.detail ? `<span class="loc-sub">${esc(place.detail)}</span>` : ''}
+          </span>
+        </button>`,
+      )
+      .join('');
+  }
+
+  el.locationSuggestions.hidden = false;
+  el.locationInput.setAttribute('aria-expanded', 'true');
+  if (activeSuggestion >= 0) {
+    el.locationInput.setAttribute('aria-activedescendant', `loc-opt-${activeSuggestion}`);
+  } else {
+    el.locationInput.removeAttribute('aria-activedescendant');
+  }
+}
+
+async function fetchSuggestions(query) {
+  const term = query.trim();
+  if (term.length < 3) {
+    suggestions = [];
+    closeSuggestions();
+    return;
+  }
+
+  suggestionController?.abort();
+  const controller = new AbortController();
+  suggestionController = controller;
+
+  const url = new URL(GEOCODE_ENDPOINT);
+  url.searchParams.set('q', term);
+  url.searchParams.set('limit', '7');
+  url.searchParams.set('lat', String(ROME_CENTER.lat));
+  url.searchParams.set('lon', String(ROME_CENTER.lon));
+  url.searchParams.set('bbox', ROME_BBOX);
+  url.searchParams.set('zoom', '12');
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (controller.signal.aborted) return;
+
+    suggestions = dedupePlaces(
+      (data.features || []).map(placeFromFeature).filter(Boolean),
+    ).slice(0, 7);
+    activeSuggestion = -1;
+    if (document.activeElement === el.locationInput) renderSuggestions();
+    else closeSuggestions();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    suggestions = [];
+    if (document.activeElement === el.locationInput) {
+      el.locationSuggestions.innerHTML =
+        '<div class="location-empty">Ricerca non disponibile, riprova tra poco</div>';
+      el.locationSuggestions.hidden = false;
+    }
+  }
+}
+
+/** Cerca il testo scritto a mano e lo usa come destinazione. */
+async function resolveTypedDestination(text) {
+  const term = String(text || '').trim();
+  if (term.length < 3) return;
+
+  const url = new URL(GEOCODE_ENDPOINT);
+  url.searchParams.set('q', term);
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('lat', String(ROME_CENTER.lat));
+  url.searchParams.set('lon', String(ROME_CENTER.lon));
+  url.searchParams.set('bbox', ROME_BBOX);
+  url.searchParams.set('zoom', '12');
+
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const place = dedupePlaces(
+      (data.features || []).map(placeFromFeature).filter(Boolean),
+    )[0];
+    if (!place) {
+      showToast('Nessun risultato per questa destinazione.');
+      return;
+    }
+    setDestination(place);
+  } catch {
+    showToast('Ricerca della destinazione non disponibile, riprova.');
+  }
+}
+
+async function reverseGeocode(lat, lon) {
+  const buildUrl = (streetOnly) => {
+    const url = new URL('https://photon.komoot.io/reverse');
+    url.searchParams.set('lat', String(lat));
+    url.searchParams.set('lon', String(lon));
+    url.searchParams.set('limit', '1');
+    if (streetOnly) url.searchParams.set('osm_tag', 'highway');
+    return url;
+  };
+
+  for (const streetOnly of [true, false]) {
+    try {
+      const res = await fetch(buildUrl(streetOnly), { headers: { Accept: 'application/json' } });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const feature = (data.features || [])[0];
+      const place = feature ? placeFromFeature(feature) : null;
+      if (place) return { ...place, feature };
+    } catch {
+      /* riprova senza filtro oppure usa il fallback */
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Trasforma una feature Photon in un indirizzo leggibile:
+ * `{ name, detail }` — es. { name: 'Piazza dei Cinquecento', detail: 'Esquilino · Roma' }.
+ */
+function describePlace(feature) {
+  if (!feature) return null;
+  const p = feature.properties || {};
+  // Prima la via (con il civico), poi eventuali luoghi notevoli, infine la località.
+  // Su una via senza civico il nome OSM sta in `name`: in quel caso è la via.
+  const isStreet = p.osm_key === 'highway' || p.type === 'street';
+  const name =
+    [p.street, p.housenumber].filter(Boolean).join(' ') ||
+    (isStreet ? p.name : '') ||
+    p.name ||
+    p.locality ||
+    p.city ||
+    '';
+  // Il campo `name` di Photon a volte contiene un nome interno: lo si usa solo
+  // come dettaglio, mai come etichetta principale se c'è già la via.
+  const detailName = p.name && p.name !== name ? p.name : '';
+  const detailParts = [];
+  if (detailName) detailParts.push(detailName);
+  if (p.district && p.district !== name) detailParts.push(p.district);
+  if (p.locality && p.locality !== name) detailParts.push(p.locality);
+  if (p.city && p.city !== name) detailParts.push(p.city);
+  if (!name && !detailParts.length) return null;
+  return {
+    name: name || detailParts[0],
+    detail: detailParts.filter((part) => part !== name).join(' · '),
+  };
+}
+
+/**
+ * Aggiorna la casella "La tua posizione attuale".
+ * `gpsState`: idle | locating | ready | denied | unavailable | timeout
+ */
+function renderCurrentPosition() {
+  if (!el.currentPositionValue) return;
+
+  const states = {
+    idle: 'non rilevata',
+    locating: 'rilevamento…',
+    ready: 'rilevata',
+    denied: 'permesso negato',
+    unavailable: 'non disponibile',
+    timeout: 'tempo scaduto',
+  };
+
+  el.currentPositionBadge.dataset.state = state.gpsState;
+  el.currentPositionBadge.textContent = states[state.gpsState] || states.idle;
+
+  const gps = state.gps;
+  if (gps) {
+    el.currentPositionValue.textContent =
+      gps.label || `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`;
+    el.currentPositionField.classList.add('is-located');
+    el.currentPositionCoords.textContent =
+      `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}` +
+      (gps.accuracy ? ` · ±${Math.round(gps.accuracy)} m` : '') +
+      (gps.at ? ` · ${timeRome(new Date(gps.at))}` : '');
+
+    const placeTitle =
+      gps.placeName && gps.placeName !== gps.label ? gps.placeName : '';
+    if (placeTitle || gps.placeDetail) {
+      el.currentPositionPlaceName.textContent = placeTitle || gps.label || '';
+      el.currentPositionPlaceDetail.textContent = gps.placeDetail || '';
+      el.currentPositionPlace.hidden = false;
+    } else {
+      el.currentPositionPlace.hidden = true;
+    }
+  } else {
+    // Senza posizione non mostriamo nessun testo: restano solo il pulsante di
+    // rilevamento e il badge di stato.
+    el.currentPositionValue.textContent = '';
+    el.currentPositionField.classList.remove('is-located');
+    el.currentPositionCoords.textContent = '';
+    el.currentPositionPlace.hidden = true;
+  }
+
+  el.currentPositionBtn.classList.toggle('is-loading', state.gpsState === 'locating');
+}
+
+/** Rileva la posizione del browser e la usa per l'app (bus e fermate vicine). */
+function detectCurrentPosition({ silent = false } = {}) {
+  if (!navigator.geolocation) {
+    state.gpsState = 'unavailable';
+    renderCurrentPosition();
+    if (!silent) showToast('La geolocalizzazione non è supportata da questo browser.');
+    return;
+  }
+
+  state.gpsState = 'locating';
+  renderCurrentPosition();
+
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const { latitude, longitude, accuracy } = position.coords;
+      state.gps = {
+        lat: latitude,
+        lon: longitude,
+        accuracy: Number.isFinite(accuracy) ? accuracy : null,
+        label: `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
+        at: Date.now(),
+      };
+      state.gpsState = 'ready';
+      renderCurrentPosition();
+
+      // La casella mostra subito le coordinate, poi la via esatta.
+      setLocation({ lat: latitude, lon: longitude, label: state.gps.label });
+
+      let place = null;
+      try {
+        place = await reverseGeocode(latitude, longitude);
+      } catch {
+        /* senza reverse geocoding restano le coordinate */
+      }
+
+      const described = describePlace(place?.feature) || null;
+      if (described) {
+        state.gps.placeName = described.name;
+        state.gps.placeDetail = described.detail;
+      }
+
+      if (place?.street || place?.title) {
+        const label = described?.name || place.street || place.title;
+        state.gps.label = label;
+        renderCurrentPosition();
+        if (state.location) {
+          state.location.label = label;
+          el.locationInput.value = label;
+          try {
+            localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(state.location));
+          } catch {
+            /* storage non disponibile */
+          }
+        }
+      }
+
+      if (!silent) showToast(`Posizione attuale: ${state.gps.label}`);
+    },
+    (error) => {
+      state.gpsState = error.code === 1 ? 'denied' : error.code === 3 ? 'timeout' : 'unavailable';
+      renderCurrentPosition();
+      if (silent) return;
+      const messages = {
+        1: 'Permesso di geolocalizzazione negato.',
+        2: 'Posizione non disponibile.',
+        3: 'Tempo scaduto durante il rilevamento della posizione.',
+      };
+      showToast(messages[error.code] || 'Impossibile rilevare la posizione attuale.');
+    },
+    { enableHighAccuracy: true, timeout: 10_000, maximumAge: 30_000 },
+  );
+}
+
+let destinationMarker = null;
+
+/** Marker della destinazione scelta in "Dove vuoi andare". */
+function renderDestinationMarker() {
+  const dest = state.destination;
+  if (!dest) {
+    if (destinationMarker) {
+      destinationMarker.remove();
+      destinationMarker = null;
+    }
+    return;
+  }
+
+  const latlng = [dest.lat, dest.lon];
+  if (!destinationMarker) {
+    destinationMarker = L.circleMarker(latlng, {
+      radius: 8,
+      color: '#ffffff',
+      weight: 2.5,
+      opacity: 1,
+      fillColor: '#2f6bff',
+      fillOpacity: 1,
+      className: 'destination-marker',
+    })
+      .addTo(map)
+      .bindTooltip('Destinazione', {
+        className: 'bus-tooltip',
+        direction: 'top',
+        offset: [0, -10],
+        opacity: 1,
+      });
+  } else {
+    destinationMarker.setLatLng(latlng);
+  }
+  destinationMarker.bringToFront();
+}
+
+function renderLocationMarker() {
+  if (!state.location) {
+    if (locationMarker) {
+      locationMarker.remove();
+      locationMarker = null;
+    }
+    return;
+  }
+
+  const latlng = [state.location.lat, state.location.lon];
+  if (!locationMarker) {
+    locationMarker = L.circleMarker(latlng, {
+      radius: 8,
+      color: '#ffffff',
+      weight: 2.5,
+      opacity: 1,
+      fillColor: '#3d8bff',
+      fillOpacity: 1,
+      className: 'user-location-marker',
+    })
+      .addTo(map)
+      .bindTooltip('La tua posizione', {
+        className: 'bus-tooltip',
+        direction: 'top',
+        offset: [0, -10],
+        opacity: 1,
+      });
+  } else {
+    locationMarker.setLatLng(latlng);
+  }
+  locationMarker.bringToFront();
+}
+
+function setLocation(place, { fly = true, save = true } = {}) {
+  state.location = {
+    lat: place.lat,
+    lon: place.lon,
+    label: place.label || place.title || 'Posizione',
+  };
+
+  // La posizione attuale vive nella sua casella: il campo "Dove vuoi andare"
+  // resta libero per la destinazione.
+  el.clearLocation.hidden = false;
+  el.locateBtn.classList.remove('is-loading');
+  suggestions = [];
+  closeSuggestions();
+  renderLocationMarker();
+  renderDestinationMarker();
+  renderRouteSummary();
+
+  if (save) {
+    try {
+      localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(state.location));
+    } catch {
+      /* storage non disponibile */
+    }
+  }
+
+  el.list.scrollTop = 0;
+  invalidateStops();
+  renderList();
+  if (state.destination) refreshRoute({ fit: false });
+  if (fly) map.flyTo([place.lat, place.lon], Math.max(map.getZoom(), 15), { duration: 0.9 });
+}
+
+/** Imposta la destinazione da raggiungere e ne disegna il tragitto. */
+function setDestination(place, { fly = false } = {}) {
+  if (!place || !Number.isFinite(place.lat) || !Number.isFinite(place.lon)) return;
+
+  state.destination = {
+    lat: place.lat,
+    lon: place.lon,
+    label: place.label || place.title || 'Destinazione',
+  };
+
+  el.locationInput.value = state.destination.label;
+  el.locationField.classList.add('is-located');
+  el.clearLocation.hidden = false;
+  suggestions = [];
+  closeSuggestions();
+  renderDestinationMarker();
+  renderRouteSummary();
+
+  if (state.gps || state.location) {
+    drawRoute({ fit: !fly });
+  } else {
+    // Senza posizione attuale disegniamo almeno il punto di partenza.
+    renderRouteSummary();
+    if (fly) map.flyTo([place.lat, place.lon], Math.max(map.getZoom(), 14), { duration: 0.9 });
+  }
+}
+
+/** Rimuove la destinazione (e il tragitto) lasciando la posizione attuale. */
+function clearDestination() {
+  state.destination = null;
+  el.locationInput.value = '';
+  el.locationField.classList.remove('is-located');
+  suggestions = [];
+  closeSuggestions();
+  renderDestinationMarker();
+  clearRoute();
+}
+
+/** La posizione è cambiata: le fermate vicine non valgono più. */
+function invalidateStops() {
+  state.stops = [];
+  state.stopsAt = null;
+  state.selectedStopId = null;
+  state.stopsSchedule = null;
+  state.stopsError = null;
+  ensureStopLayer().clearLayers();
+  state.stopMarkers = new Map();
+  if (state.tab === 'stops') {
+    loadNearbyStops({ silent: true });
+  } else {
+    renderStops();
+  }
+}
+
+function applySavedLocation() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(LOCATION_STORAGE_KEY) || 'null');
+  } catch {
+    saved = null;
+  }
+
+  if (
+    !saved ||
+    !Number.isFinite(Number(saved.lat)) ||
+    !Number.isFinite(Number(saved.lon)) ||
+    !saved.label
+  ) {
+    return;
+  }
+
+  setLocation(
+    { lat: Number(saved.lat), lon: Number(saved.lon), label: saved.label },
+    { fly: false, save: false },
+  );
+}
+
+function clearLocation() {
+  state.location = null;
+  el.locationInput.value = '';
+  el.locationField.classList.remove('is-located');
+  el.clearLocation.hidden = true;
+  el.locateBtn.classList.remove('is-loading');
+  suggestions = [];
+  closeSuggestions();
+  renderLocationMarker();
+  try {
+    localStorage.removeItem(LOCATION_STORAGE_KEY);
+  } catch {
+    /* storage non disponibile */
+  }
+  invalidateStops();
+  renderList();
+  clearRoute();
+}
+
+function restoreLocationLabel(previous) {
+  if (previous) {
+    el.locationInput.value = previous.label;
+    el.locationField.classList.add('is-located');
+    el.clearLocation.hidden = false;
+  } else {
+    el.locationInput.value = '';
+    el.locationField.classList.remove('is-located');
+    el.clearLocation.hidden = true;
+  }
+}
+
+function locateMe() {
+  const previous = state.location ? { ...state.location } : null;
+
+  // Aggiorna subito la casella al click; la posizione esatta arriva appena disponibile.
+  clearTimeout(suggestionTimer);
+  suggestions = [];
+  closeSuggestions();
+  el.locationInput.value = 'Posizione attuale…';
+  el.locationField.classList.add('is-located');
+
+  useCurrentPosition({ previous });
+}
+
+async function useCurrentPosition({ silent = false, previous = null } = {}) {
+  if (!navigator.geolocation) {
+    if (!silent) {
+      restoreLocationLabel(previous);
+      showToast('La geolocalizzazione non è supportata da questo browser.');
+    }
+    return;
+  }
+
+  el.locateBtn.classList.add('is-loading');
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const { latitude, longitude } = position.coords;
+      const coordsLabel = `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+
+      // Mostra subito un valore nella casella, poi lo sostituisce con la via esatta.
+      el.locationInput.value = coordsLabel;
+      el.locationField.classList.add('is-located');
+      el.clearLocation.hidden = false;
+
+      let place = null;
+      try {
+        place = await reverseGeocode(latitude, longitude);
+      } catch {
+        /* senza reverse geocoding mostriamo comunque la posizione */
+      }
+
+      setLocation({
+        lat: latitude,
+        lon: longitude,
+        label: place?.street || place?.title || coordsLabel,
+      });
+
+      if (!silent) {
+        showToast(place?.street ? `Posizione impostata: ${place.street}` : 'Posizione attuale rilevata.');
+      }
+    },
+    (error) => {
+      el.locateBtn.classList.remove('is-loading');
+      if (silent) return;
+      restoreLocationLabel(previous);
+      const messages = {
+        1: 'Permesso di geolocalizzazione negato.',
+        2: 'Posizione non disponibile.',
+        3: 'Tempo scaduto durante il rilevamento della posizione.',
+      };
+      showToast(messages[error.code] || 'Impossibile rilevare la posizione attuale.');
+    },
+    { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+  );
+}
+
+/* ---------- fermate vicine ---------- */
+
+let stopLayer = null;
+let nearbyController = null;
+
+const NEARBY_RADIUS_KEY = 'atac-bus-live.nearby-radius';
+
+function loadSavedRadius() {
+  try {
+    const saved = Number(localStorage.getItem(NEARBY_RADIUS_KEY));
+    if (Number.isFinite(saved) && saved >= 100 && saved <= 2000) state.stopsRadius = saved;
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+function saveRadius(value) {
+  try {
+    localStorage.setItem(NEARBY_RADIUS_KEY, String(value));
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+function ensureStopLayer() {
+  if (stopLayer) return stopLayer;
+  stopLayer = L.layerGroup().addTo(map);
+  return stopLayer;
+}
+
+function stopIcon(stop) {
+  const selected = stop.id === state.selectedStopId;
+  return L.divIcon({
+    className: 'stop-marker-wrap',
+    html: `<span class="stop-marker${selected ? ' is-selected' : ''}"></span>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+  });
+}
+
+function stopPopupHtml(stop) {
+  const lines = stop.lines.length
+    ? stop.lines
+        .map(
+          (l) => `
+          <li class="stop-line">
+            <span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>
+            <span class="stop-line-main">
+              <span class="stop-line-dest">${esc(l.headsign || 'Destinazione n.d.')}</span>
+              <span class="stop-line-meta">
+                ${l.activeBuses ? `${l.activeBuses} ${l.activeBuses === 1 ? 'bus in linea' : 'bus in linea'}` : 'nessun bus in linea'}
+                ${l.nearestBusMeters !== null ? ` · più vicino ${esc(formatDistance(l.nearestBusMeters))}` : ''}
+              </span>
+            </span>
+            <span class="stop-wait">${esc(formatWait(l.waitMinutes))}</span>
+          </li>`,
+        )
+        .join('')
+    : '<li class="stop-line stop-line-empty">Orari non disponibili per questa fermata</li>';
+
+  return `
+    <div class="popup">
+      <div class="popup-head">
+        <span class="popup-dest">${esc(stop.name)}</span>
+      </div>
+      <div class="popup-sub">${esc(formatDistance(stop.distance))} da te · fermata ${esc(stop.code || stop.id)}</div>
+      <ul class="stop-lines">${lines}</ul>
+      <button class="popup-btn" type="button" data-stop-focus="${esc(stop.id)}">
+        Vedi tutti i passaggi
+      </button>
+    </div>`;
+}
+
+function renderStopMarkers() {
+  const layer = ensureStopLayer();
+  layer.clearLayers();
+  state.stopMarkers = new Map();
+
+  for (const stop of state.stops) {
+    const marker = L.marker([stop.lat, stop.lon], {
+      icon: stopIcon(stop),
+      keyboard: false,
+      title: stop.name,
+    })
+      .addTo(layer)
+      .bindPopup(() => stopPopupHtml(stop), { maxWidth: 300, minWidth: 250 });
+
+    marker.on('click', () => {
+      state.selectedStopId = stop.id;
+      renderStops();
+      renderStopMarkers();
+    });
+
+    state.stopMarkers.set(stop.id, marker);
+  }
+}
+
+async function loadNearbyStops({ silent = false } = {}) {
+  if (!state.location) {
+    if (!silent) showToast('Imposta prima la tua posizione o usa la geolocalizzazione.');
+    return;
+  }
+
+  nearbyController?.abort();
+  const controller = new AbortController();
+  nearbyController = controller;
+
+  state.stopsLoading = true;
+  state.stopsError = null;
+  renderStops();
+
+  const url = new URL('/api/stops/nearby', window.location.origin);
+  url.searchParams.set('lat', String(state.location.lat));
+  url.searchParams.set('lon', String(state.location.lon));
+  url.searchParams.set('radius', String(state.stopsRadius));
+  url.searchParams.set('limit', '8');
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (controller.signal.aborted) return;
+
+    state.stops = (data.stops || []).map((stop) => ({
+      ...stop,
+      lines: [...(stop.lines || [])].sort(
+        (a, b) => a.waitMinutes - b.waitMinutes || compareLines(a.line, b.line),
+      ),
+    }));
+    state.stopsAt = new Date();
+    state.stopsSchedule = data.schedule || null;
+    if (!state.stops.some((s) => s.id === state.selectedStopId)) state.selectedStopId = null;
+
+    renderStops();
+    renderStopMarkers();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    state.stopsError = err.message;
+    state.stops = [];
+    ensureStopLayer().clearLayers();
+    state.stopMarkers = new Map();
+    renderStops();
+  } finally {
+    if (nearbyController === controller) nearbyController = null;
+    state.stopsLoading = false;
+    renderStops();
+  }
+}
+
+function renderStops() {
+  el.tabStopCount.textContent = state.stops.length.toLocaleString('it-IT');
+  if (state.tab !== 'stops') return;
+
+  el.listTitle.textContent = 'Fermate vicine';
+  el.listCount.textContent = state.stops.length.toLocaleString('it-IT');
+
+  if (!state.location) {
+    el.list.innerHTML = emptyStopsState(
+      'Imposta la tua posizione',
+      'Cerca un indirizzo, tocca il mirino o trascina la mappa e premi «Fermate qui».',
+      true,
+    );
+    return;
+  }
+
+  if (state.stopsLoading && !state.stops.length) {
+    el.list.innerHTML = `
+      <div class="list-loading">
+        <span class="spinner" aria-hidden="true"></span>
+        Cerco le fermate vicine…
+      </div>`;
+    return;
+  }
+
+  if (state.stopsError) {
+    el.list.innerHTML = emptyStopsState('Ricerca non riuscita', state.stopsError);
+    return;
+  }
+
+  if (!state.stops.length) {
+    el.list.innerHTML = emptyStopsState(
+      'Nessuna fermata vicina',
+      `Non ci sono fermate ATAC entro ${formatDistance(state.stopsRadius)}. Allarga il raggio di ricerca.`,
+    );
+    return;
+  }
+
+  const scheduleNote = state.stopsSchedule?.ready
+    ? `orari aggiornati ${state.stopsSchedule.updatedAt ? timeRome(new Date(state.stopsSchedule.updatedAt)) : ''}`
+    : 'orari in caricamento…';
+
+  const rows = state.stops.map((stop) => {
+    const lines = stop.lines.length
+      ? stop.lines
+          .map(
+            (l) => `
+            <span class="stop-chip" title="${esc(l.headsign || '')}">
+              <span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>
+              <span class="stop-chip-wait">${esc(formatWait(l.waitMinutes))}</span>
+              ${l.activeBuses ? '<span class="stop-chip-live" aria-label="bus in linea"></span>' : ''}
+            </span>`,
+          )
+          .join('')
+      : '<span class="stop-no-lines">orari non disponibili</span>';
+
+    return `
+      <button class="stop-row${stop.id === state.selectedStopId ? ' is-selected' : ''}" type="button"
+        role="listitem" data-stop="${esc(stop.id)}" title="${esc(stop.name)}">
+        <span class="stop-main">
+          <span class="stop-name">${esc(stop.name)}</span>
+          <span class="stop-meta">${esc(formatDistance(stop.distance))} · fermata ${esc(stop.code || stop.id)}</span>
+          <span class="stop-chips">${lines}</span>
+        </span>
+        <span class="stop-arrow" aria-hidden="true">›</span>
+      </button>`;
+  });
+
+  el.list.innerHTML = `
+    <div class="stops-toolbar">
+      <span class="stops-radius-label">Raggio</span>
+      <select id="stopsRadius" class="stops-radius" aria-label="Raggio di ricerca">
+        ${[250, 500, 1000, 2000]
+          .map(
+            (r) =>
+              `<option value="${r}"${r === state.stopsRadius ? ' selected' : ''}>${formatDistance(r)}</option>`,
+          )
+          .join('')}
+      </select>
+      <button class="btn btn-small" id="stopsRefresh" type="button">Aggiorna</button>
+    </div>
+    <div class="stops-note">${esc(scheduleNote)}</div>
+    ${rows.join('')}`;
+}
+
+function emptyStopsState(title, message, withButton = false) {
+  return `
+    <div class="empty">
+      <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true">
+        <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
+          fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+        <circle cx="12" cy="10" r="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      </svg>
+      <strong>${esc(title)}</strong>
+      <span>${esc(message)}</span>
+      ${withButton ? '<button class="btn btn-small" id="stopsLocate" type="button">Usa la mia posizione</button>' : ''}
+    </div>`;
+}
+
+function focusStop(stopId) {
+  const stop = state.stops.find((s) => s.id === stopId);
+  if (!stop) return;
+  state.selectedStopId = stopId;
+  renderStops();
+  renderStopMarkers();
+  map.flyTo([stop.lat, stop.lon], Math.max(map.getZoom(), 16), { duration: 0.7 });
+  const marker = state.stopMarkers.get(stopId);
+  if (marker) window.setTimeout(() => marker.openPopup(), 400);
+}
+
+function openNearby() {
+  state.tab = 'stops';
+  syncTabs();
+  renderStops();
+
+  if (!state.location) {
+    showToast('Cerca la tua posizione o tocca il mirino per vedere le fermate vicine.');
+    el.locationInput.focus();
+    return;
+  }
+  if (!state.stops.length && !state.stopsLoading) loadNearbyStops();
+}
+
+/* ---------- tragitto: dalla destinazione alla posizione attuale ---------- */
+
+const ROUTER_ENDPOINT = 'https://router.project-osrm.org/route/v1/foot';
+const ROUTE_COLOR = '#2f6bff';
+
+let routeLayer = null;
+let routeController = null;
+
+function ensureRouteLayer() {
+  if (!routeLayer) routeLayer = L.layerGroup().addTo(map);
+  return routeLayer;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return '';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 1) return 'meno di 1 min';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+/** Nome leggibile della destinazione scelta in "Dove vuoi andare". */
+function destinationLabel() {
+  if (state.destination?.label) return state.destination.label;
+  if (state.location?.label) return state.location.label;
+  return el.locationInput.value.trim();
+}
+
+/** Aggiorna la riga con distanza, durata e il pulsante per rimuovere il tragitto. */
+function renderRouteSummary() {
+  const route = state.route;
+  if (!route) {
+    el.routeSummary.hidden = true;
+    el.routeText.textContent = '';
+    return;
+  }
+
+  const parts = [];
+  if (Number.isFinite(route.distance)) parts.push(formatDistance(route.distance));
+  if (Number.isFinite(route.duration)) parts.push(formatDuration(route.duration));
+  const dest = destinationLabel();
+
+  el.routeSummary.hidden = false;
+  el.routeText.textContent = parts.length
+    ? `${parts.join(' · ')} fino a ${dest}`
+    : `Tragitto fino a ${dest}`;
+}
+
+function clearRoute({ keepSummary = false } = {}) {
+  routeController?.abort();
+  routeController = null;
+  state.route = null;
+  state.routeStops = [];
+  state.tripOptions = [];
+  ensureRouteLayer().clearLayers();
+  if (!keepSummary) renderRouteSummary();
+  if (state.tripViewOpen) closeTripView();
+  else if (state.tripOpen) closeTripReport();
+}
+
+/**
+ * Disegna in blu il percorso dalla destinazione (campo "Dove vuoi andare")
+ * alla posizione attuale, usando il routing pedonale di OSRM.
+ */
+async function drawRoute({ fit = true } = {}) {
+  const from = state.destination;
+  const to = state.gps || state.location;
+
+  if (!from || !Number.isFinite(from.lat) || !Number.isFinite(from.lon)) return false;
+  if (!to || !Number.isFinite(to.lat) || !Number.isFinite(to.lon)) return false;
+
+  routeController?.abort();
+  const controller = new AbortController();
+  routeController = controller;
+
+  const url =
+    `${ROUTER_ENDPOINT}/${from.lon},${from.lat};${to.lon},${to.lat}` +
+    '?overview=full&geometries=geojson&steps=true';
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (controller.signal.aborted) return false;
+
+    const best = (data.routes || [])[0];
+    if (!best?.geometry?.coordinates?.length) throw new Error('Percorso non trovato');
+
+    // GeoJSON è [lon, lat]: Leaflet vuole [lat, lon].
+    const points = best.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    const layer = ensureRouteLayer();
+    layer.clearLayers();
+
+    // Alone chiaro sotto la linea, così il blu resta leggibile su ogni mappa.
+    L.polyline(points, {
+      color: '#ffffff',
+      weight: 9,
+      opacity: 0.55,
+      lineCap: 'round',
+      lineJoin: 'round',
+      interactive: false,
+    }).addTo(layer);
+
+    const line = L.polyline(points, {
+      color: ROUTE_COLOR,
+      weight: 5,
+      opacity: 0.95,
+      lineCap: 'round',
+      lineJoin: 'round',
+      dashArray: null,
+      interactive: false,
+    }).addTo(layer);
+
+    state.route = {
+      distance: best.distance,
+      duration: best.duration,
+      from: { lat: from.lat, lon: from.lon },
+      to: { lat: to.lat, lon: to.lon },
+      points,
+      // Indicazioni passo-passo restituite dal router (per il report di viaggio).
+      steps: (best.legs?.[0]?.steps || []).map((step) => ({
+        name: step.name || '',
+        distance: step.distance,
+        duration: step.duration,
+        type: step.maneuver?.type || '',
+        modifier: step.maneuver?.modifier || '',
+      })),
+    };
+    renderRouteSummary();
+
+    // Se il report è aperto, lo aggiorna con il nuovo tragitto.
+    if (state.tripOpen) openTripReport();
+
+    if (fit) map.fitBounds(line.getBounds(), { padding: [56, 56], maxZoom: 16 });
+    return true;
+  } catch (err) {
+    if (err.name === 'AbortError') return false;
+    clearRoute();
+    showToast(`Tragitto non disponibile: ${err.message}`);
+    return false;
+  } finally {
+    if (routeController === controller) routeController = null;
+  }
+}
+
+/* ---------- report di viaggio (stile Moovit) ---------- */
+
+const TRIP_MODE_KEY = 'atac-bus-live.trip-mode';
+const BUS_WAIT_BUFFER_MIN = 2;
+const BUS_SPEED_KMH = 18;
+const BUS_DWELL_MIN = 1;
+const MAX_TRIP_OPTIONS = 3;
+
+/**
+ * Fermate ATAC entro ~220 m dalla polilinea del tragitto: sono i punti di
+ * salita e discesa possibili, come nelle app di navigazione.
+ */
+async function findStopsAlongRoute(points) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+
+  const step = Math.max(1, Math.floor(points.length / 8));
+  const sampled = [];
+  for (let i = 0; i < points.length; i += step) sampled.push(points[i]);
+  const last = points[points.length - 1];
+  if (sampled[sampled.length - 1] !== last) sampled.push(last);
+
+  const found = new Map();
+  await Promise.all(
+    sampled.map(async ([lat, lon]) => {
+      try {
+        const url = `/api/stops/nearby?lat=${lat}&lon=${lon}&radius=220&limit=6`;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const stop of data.stops || []) {
+          const current = found.get(stop.id);
+          if (!current || stop.distance < current.distance) {
+            found.set(stop.id, { ...stop, alongDistance: stop.distance });
+          }
+        }
+      } catch {
+        /* un campione fallito non blocca il report */
+      }
+    }),
+  );
+
+  return [...found.values()].sort((a, b) => a.alongDistance - b.alongDistance);
+}
+
+/** Fermate lungo il tragitto con almeno una linea in circolazione. */
+function linesAlongRoute(stops) {
+  const byRoute = new Map();
+
+  for (const stop of stops || []) {
+    for (const line of stop.lines || []) {
+      const wait = Number.isFinite(line.waitMinutes) ? line.waitMinutes : null;
+      const current = byRoute.get(line.routeId);
+      if (!current) {
+        byRoute.set(line.routeId, {
+          routeId: line.routeId,
+          line: line.line,
+          headsign: line.headsign || '',
+          waitMinutes: wait,
+          activeBuses: line.activeBuses || 0,
+          stopName: stop.name,
+        });
+        continue;
+      }
+      if (wait !== null && (current.waitMinutes === null || wait < current.waitMinutes)) {
+        current.waitMinutes = wait;
+        current.headsign = line.headsign || current.headsign;
+        current.stopName = stop.name;
+      }
+      current.activeBuses = Math.max(current.activeBuses, line.activeBuses || 0);
+    }
+  }
+
+  return [...byRoute.values()].sort((a, b) => {
+    const wa = a.waitMinutes ?? Infinity;
+    const wb = b.waitMinutes ?? Infinity;
+    if (wa !== wb) return wa - wb;
+    return compareLines(a.line, b.line);
+  });
+}
+
+function tripMinutes(seconds) {
+  return Number.isFinite(seconds) ? Math.max(1, Math.round(seconds / 60)) : 0;
+}
+
+/**
+ * Costruisce le alternative di viaggio confrontabili, come le schede di Moovit:
+ * a piedi, bus diretto, bus + a piedi e, se serve, un trasbordo.
+ */
+function buildTripOptions(route, stops) {
+  const walkMinutes = tripMinutes(route.duration);
+  const dest = destinationLabel();
+  const here = state.gps?.label || state.location?.label || 'Posizione attuale';
+  const lines = linesAlongRoute(stops).filter((l) => l.activeBuses > 0 || l.waitMinutes !== null);
+
+  const options = [
+    {
+      id: 'walk',
+      mode: 'walk',
+      title: 'A piedi',
+      lines: [],
+      minutes: walkMinutes,
+      arriveAt: Date.now() + (route.duration || 0) * 1000,
+      distance: route.distance,
+      summary: `${formatDistance(route.distance)} a piedi da ${dest} a ${here}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `Cammina da ${dest}`,
+          detail: `${formatDistance(route.distance)} · ${formatDuration(route.duration)}`,
+        },
+      ],
+    },
+  ];
+
+  const walkToStop = Math.max(1, Math.round((stops[0]?.alongDistance || 150) / 80));
+  const busLine = lines[0];
+  // Valori di riferimento per il trasbordo (o se non c'è una prima linea).
+  const wait = busLine && Number.isFinite(busLine.waitMinutes)
+    ? Math.max(0, busLine.waitMinutes)
+    : BUS_WAIT_BUFFER_MIN;
+  const rideMinutes = Math.max(
+    2,
+    Math.round((route.distance / 1000 / BUS_SPEED_KMH) * 60) + BUS_DWELL_MIN,
+  );
+
+  if (busLine) {
+    options.push({
+      id: `bus-${busLine.routeId}`,
+      mode: 'bus',
+      title: `Bus ${busLine.line}`,
+      lines: [busLine],
+      minutes: walkToStop + wait + rideMinutes,
+      arriveAt: Date.now() + (walkToStop + wait + rideMinutes) * 60_000,
+      distance: route.distance,
+      summary: `Fermata ${busLine.stopName} · ${busLine.headsign || 'linea ' + busLine.line}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `A piedi fino alla fermata ${busLine.stopName}`,
+          detail: `${walkToStop} min · ${formatDistance(stops[0]?.alongDistance || 150)}`,
+        },
+        {
+          kind: 'bus',
+          label: `Bus ${busLine.line} → ${busLine.headsign || 'destinazione'}`,
+          detail: `attesa ${formatWait(wait)} · ${busLine.activeBuses} in linea`,
+          routeId: busLine.routeId,
+          line: busLine.line,
+        },
+        {
+          kind: 'walk',
+          label: 'Scendi e raggiungi la posizione attuale',
+          detail: '1 min a piedi',
+        },
+      ],
+    });
+  }
+
+  // Trasbordo: una seconda linea che passa da un'altra fermata del percorso.
+  const transfer = lines.find((l) => l.routeId !== busLine?.routeId && l.stopName !== busLine?.stopName);
+  if (busLine && transfer) {
+    const wait2 = Number.isFinite(transfer.waitMinutes) ? Math.max(1, transfer.waitMinutes) : BUS_WAIT_BUFFER_MIN + 1;
+    const ride2 = Math.max(2, Math.round((route.distance / 1000 / BUS_SPEED_KMH) * 45));
+    options.push({
+      id: `bus-${busLine.routeId}-${transfer.routeId}`,
+      mode: 'bus',
+      title: `Bus ${busLine.line} + ${transfer.line}`,
+      lines: [busLine, transfer],
+      minutes: walkToStop + wait + ride2 + wait2 + BUS_DWELL_MIN,
+      arriveAt: Date.now() + (walkToStop + wait + ride2 + wait2 + BUS_DWELL_MIN) * 60_000,
+      distance: route.distance,
+      summary: `Cambio a ${transfer.stopName} · ${transfer.headsign || 'linea ' + transfer.line}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `A piedi fino alla fermata ${busLine.stopName}`,
+          detail: `${walkToStop} min`,
+        },
+        {
+          kind: 'bus',
+          label: `Bus ${busLine.line} → ${busLine.headsign || 'destinazione'}`,
+          detail: `attesa ${formatWait(wait)}`,
+          routeId: busLine.routeId,
+          line: busLine.line,
+        },
+        {
+          kind: 'bus',
+          label: `Cambio: bus ${transfer.line} → ${transfer.headsign || 'destinazione'}`,
+          detail: `a ${transfer.stopName} · attesa ${formatWait(wait2)}`,
+          routeId: transfer.routeId,
+          line: transfer.line,
+        },
+        {
+          kind: 'walk',
+          label: 'Scendi e raggiungi la posizione attuale',
+          detail: '1 min a piedi',
+        },
+      ],
+    });
+  }
+
+  return options
+    .sort((a, b) => a.minutes - b.minutes)
+    .slice(0, MAX_TRIP_OPTIONS)
+    .map((option, index) => ({ ...option, best: index === 0 }));
+}
+
+function loadSavedTripMode() {
+  try {
+    const saved = localStorage.getItem(TRIP_MODE_KEY);
+    if (saved) state.tripMode = saved;
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+function saveTripMode(mode) {
+  try {
+    localStorage.setItem(TRIP_MODE_KEY, mode);
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+/** Schede con le alternative di viaggio (a piedi, bus, trasbordo). */
+function renderTripOptions() {
+  const options = state.tripOptions || [];
+  if (!options.length) {
+    el.tripOptions.innerHTML = '';
+    return;
+  }
+
+  if (!options.some((o) => o.id === state.tripMode)) state.tripMode = options[0].id;
+
+  el.tripOptions.innerHTML = options
+    .map((option) => {
+      const active = option.id === state.tripMode;
+      const chips = option.lines
+        .map((l) => `<span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>`)
+        .join('');
+      return `
+        <button class="trip-option${active ? ' is-active' : ''}" type="button"
+          data-trip-option="${esc(option.id)}" aria-pressed="${active}">
+          <span class="trip-option-main">
+            <span class="trip-option-title">
+              ${chips || '<span class="trip-option-walk-icon" aria-hidden="true">🚶</span>'}
+              <span>${esc(option.title)}</span>
+              ${option.best ? '<span class="trip-best">migliore</span>' : ''}
+            </span>
+            <span class="trip-option-sub">${esc(option.summary)}</span>
+          </span>
+          <span class="trip-option-time">
+            <strong>${option.minutes} min</strong>
+            <span>${timeRome(new Date(option.arriveAt)).slice(0, 5)}</span>
+          </span>
+        </button>`;
+    })
+    .join('');
+
+  renderTripLegs();
+  if (state.tripViewOpen) renderTripMap();
+}
+
+/** Tappe dell'alternativa selezionata. */
+function renderTripLegs() {
+  const option = (state.tripOptions || []).find((o) => o.id === state.tripMode);
+  if (!option) {
+    el.tripSteps.innerHTML = '';
+    return;
+  }
+
+  el.tripSteps.innerHTML = option.legs
+    .map((leg) => {
+      const isBus = leg.kind === 'bus';
+      const icon = isBus
+        ? `<span class="line-chip" style="${chipStyle(leg.line || '')}">${esc(leg.line || 'bus')}</span>`
+        : '<span class="trip-step-walk" aria-hidden="true">🚶</span>';
+      return `
+        <li class="trip-step" data-kind="${esc(leg.kind)}">
+          <span class="trip-step-icon">${icon}</span>
+          <span class="trip-step-main">
+            <strong>${esc(leg.label)}</strong>
+            <span>${esc(leg.detail || '')}</span>
+          </span>
+        </li>`;
+    })
+    .join('');
+}
+
+/** Elenco delle linee disponibili vicino al percorso (sotto le tappe). */
+function renderTripBuses() {
+  const lines = linesAlongRoute(state.routeStops).slice(0, 6);
+
+  if (!lines.length) {
+    el.tripBuses.innerHTML =
+      '<span class="trip-empty">Nessuna linea ATAC rilevata lungo questo percorso.</span>';
+    return;
+  }
+
+  el.tripBuses.innerHTML = lines
+    .map(
+      (l) => `
+      <button class="trip-bus" type="button" data-trip-line="${esc(l.routeId)}"
+        title="Mostra la linea ${esc(l.line)} sulla mappa">
+        <span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>
+        <span class="trip-bus-main">
+          <span class="trip-bus-dest">${esc(l.headsign || 'Destinazione n.d.')}</span>
+          <span class="trip-bus-meta">${esc(l.stopName)}${
+            l.activeBuses ? ` · ${l.activeBuses} in linea` : ''
+          }</span>
+        </span>
+        <span class="trip-bus-wait">${esc(formatWait(l.waitMinutes))}</span>
+      </button>`,
+    )
+    .join('');
+}
+
+/** Riepilogo numerico dell'alternativa scelta. */
+function renderTripStats() {
+  const route = state.route;
+  const option = (state.tripOptions || []).find((o) => o.id === state.tripMode);
+  if (!route || !option) return;
+
+  el.tripDistance.textContent = formatDistance(option.distance || route.distance) || '—';
+  el.tripDuration.textContent = `${option.minutes} min`;
+  el.tripArrival.textContent = timeRome(new Date(option.arriveAt)).slice(0, 5);
+}
+
+/* ---------- vista di viaggio (schermata indicazioni) ---------- */
+
+const TRIP_MAP_TILES = MAP_STYLES.osm.layers[0];
+
+/** Crea la mappa dedicata della vista di viaggio (una sola volta). */
+function ensureTripMap() {
+  if (state.tripMap) return state.tripMap;
+  if (typeof L === 'undefined' || !el.tripMapEl) return null;
+
+  const tripMap = L.map(el.tripMapEl, {
+    zoomControl: false,
+    preferCanvas: true,
+    minZoom: 10,
+    maxZoom: 19,
+    attributionControl: true,
+  }).setView([41.9, 12.51], 13);
+
+  L.tileLayer(TRIP_MAP_TILES.url, TRIP_MAP_TILES.options).addTo(tripMap);
+  L.control.zoom({ position: 'bottomright' }).addTo(tripMap);
+
+  state.tripMap = tripMap;
+  state.tripRouteLayer = L.layerGroup().addTo(tripMap);
+  state.tripPointLayer = L.layerGroup().addTo(tripMap);
+  return tripMap;
+}
+
+/** Disegna percorso, partenza, arrivo e fermate dell'alternativa scelta. */
+function renderTripMap() {
+  const tripMap = ensureTripMap();
+  const route = state.route;
+  if (!tripMap || !route?.points?.length) return;
+
+  state.tripRouteLayer.clearLayers();
+  state.tripPointLayer.clearLayers();
+
+  const points = route.points;
+
+  L.polyline(points, {
+    color: '#ffffff',
+    weight: 10,
+    opacity: 0.6,
+    lineCap: 'round',
+    lineJoin: 'round',
+    interactive: false,
+  }).addTo(state.tripRouteLayer);
+
+  L.polyline(points, {
+    color: ROUTE_COLOR,
+    weight: 6,
+    opacity: 0.95,
+    lineCap: 'round',
+    lineJoin: 'round',
+    interactive: false,
+  }).addTo(state.tripRouteLayer);
+
+  const start = points[0];
+  const end = points[points.length - 1];
+
+  L.circleMarker(start, {
+    radius: 8,
+    color: '#ffffff',
+    weight: 2.5,
+    fillColor: ROUTE_COLOR,
+    fillOpacity: 1,
+  })
+    .addTo(state.tripPointLayer)
+    .bindTooltip(`Partenza · ${esc(destinationLabel())}`, {
+      className: 'bus-tooltip',
+      direction: 'top',
+      offset: [0, -10],
+    });
+
+  L.circleMarker(end, {
+    radius: 8,
+    color: '#ffffff',
+    weight: 2.5,
+    fillColor: '#38d47f',
+    fillOpacity: 1,
+  })
+    .addTo(state.tripPointLayer)
+    .bindTooltip(`Arrivo · ${esc(state.gps?.label || state.location?.label || 'posizione attuale')}`, {
+      className: 'bus-tooltip',
+      direction: 'top',
+      offset: [0, -10],
+    });
+
+  // Fermate utili dell'alternativa selezionata.
+  const option = (state.tripOptions || []).find((o) => o.id === state.tripMode);
+  const wantedStops = new Set();
+  for (const leg of option?.legs || []) {
+    if (leg.stopName) wantedStops.add(leg.stopName);
+  }
+
+  for (const stop of state.routeStops || []) {
+    if (wantedStops.size && !wantedStops.has(stop.name)) continue;
+    L.marker([stop.lat, stop.lon], { icon: stopIcon(stop), keyboard: false, title: stop.name })
+      .addTo(state.tripPointLayer)
+      .bindTooltip(esc(stop.name), {
+        className: 'bus-tooltip',
+        direction: 'top',
+        offset: [0, -8],
+      });
+  }
+
+  tripMap.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 16 });
+  el.tripMapTitle.textContent = `${destinationLabel()} → ${state.gps?.label || state.location?.label || 'posizione attuale'}`;
+}
+
+/** Indicazioni stradali testuali, come il passo-passo di una navigazione. */
+function renderTripDirections() {
+  const route = state.route;
+  if (!route) {
+    el.tripDirections.innerHTML = '';
+    return;
+  }
+
+  const steps = route.steps || [];
+  if (!steps.length) {
+    el.tripDirections.innerHTML =
+      '<li class="trip-direction trip-empty">Indicazioni non disponibili per questo tragitto.</li>';
+    return;
+  }
+
+  const arrows = {
+    depart: '↑',
+    arrive: '⚑',
+    turn: '↱',
+    'new name': '↑',
+    continue: '↑',
+    merge: '⤳',
+    'fork': '⑂',
+    'end of road': '↰',
+    roundabout: '↻',
+    rotary: '↻',
+    'on ramp': '⤴',
+    'off ramp': '⤵',
+  };
+
+  el.tripDirections.innerHTML = steps
+    .map((step) => {
+      const arrow = arrows[step.type] || '↑';
+      const name = step.name ? esc(step.name) : 'Via senza nome';
+      const detail = step.distance
+        ? `${formatDistance(step.distance)} · ${formatDuration(step.duration)}`
+        : 'arrivo';
+      return `
+        <li class="trip-direction">
+          <span class="trip-direction-icon" aria-hidden="true">${arrow}</span>
+          <span class="trip-direction-main">
+            <strong>${name}</strong>
+            <span>${detail}</span>
+          </span>
+        </li>`;
+    })
+    .join('');
+}
+
+/** Mostra la schermata di viaggio (pannello + mappa dedicata). */
+function openTripView() {
+  if (!state.route) {
+    showToast('Scegli prima una destinazione in «Dove vuoi andare».');
+    return;
+  }
+
+  state.tripViewOpen = true;
+  el.tripView.hidden = false;
+  document.body.classList.add('trip-view-open');
+
+  el.tripFromInput.value = destinationLabel();
+  el.tripToInput.value = state.gps?.label || state.location?.label || 'Posizione attuale';
+
+  renderTripDirections();
+
+  // La mappa va inizializzata dopo che il contenitore è visibile e con le
+  // dimensioni definitive: qualche frame di attesa evita tile neri.
+  const refreshTripMap = (attempt = 0) => {
+    const tripMap = ensureTripMap();
+    if (!tripMap) return;
+    tripMap.invalidateSize();
+    renderTripMap();
+    if (attempt < 3) {
+      window.setTimeout(() => refreshTripMap(attempt + 1), 120 * (attempt + 1));
+    }
+  };
+  window.requestAnimationFrame(() => refreshTripMap());
+
+  openTripReport();
+}
+
+function closeTripView() {
+  state.tripViewOpen = false;
+  el.tripView.hidden = true;
+  document.body.classList.remove('trip-view-open');
+  closeTripReport();
+  if (state.tripMap) window.setTimeout(() => state.tripMap.invalidateSize(), 60);
+}
+
+/** Apre il pannello con il report di viaggio completo. */
+async function openTripReport() {
+  const route = state.route;
+  if (!route) {
+    showToast('Scegli prima una destinazione in «Dove vuoi andare».');
+    return;
+  }
+
+  state.tripOpen = true;
+  // Nella vista di viaggio i dati stanno nel pannello sinistro dedicato.
+  el.tripReport.hidden = state.tripViewOpen;
+  el.routeOpen?.classList.add('is-active');
+
+  el.tripRoute.textContent = `${destinationLabel()} → ${state.gps?.label || state.location?.label || 'posizione attuale'}`;
+  el.tripNote.textContent = `Calcolato alle ${timeRome()}`;
+  el.tripOptions.innerHTML = '<span class="trip-empty">Calcolo le alternative…</span>';
+  el.tripSteps.innerHTML = '';
+  el.tripBuses.innerHTML = '<span class="trip-empty">Cerco le linee che passano di qui…</span>';
+
+  // Prima le tappe a piedi dal router, così il report è subito utile.
+  state.tripOptions = [
+    {
+      id: 'walk',
+      mode: 'walk',
+      title: 'A piedi',
+      lines: [],
+      minutes: tripMinutes(route.duration),
+      arriveAt: Date.now() + (route.duration || 0) * 1000,
+      distance: route.distance,
+      summary: `${formatDistance(route.distance)} a piedi fino a ${state.gps?.label || 'posizione attuale'}`,
+      legs: [
+        {
+          kind: 'walk',
+          label: `Cammina da ${destinationLabel()}`,
+          detail: `${formatDistance(route.distance)} · ${formatDuration(route.duration)}`,
+        },
+      ],
+    },
+  ];
+  if (!state.tripMode) state.tripMode = 'walk';
+  renderTripOptions();
+  renderTripStats();
+
+  const stops = await findStopsAlongRoute(route.points || []);
+  if (!state.tripOpen || state.route !== route) return;
+
+  state.routeStops = stops;
+  state.tripOptions = buildTripOptions(route, stops);
+  renderTripOptions();
+  renderTripStats();
+  renderTripBuses();
+  if (state.tripViewOpen) renderTripMap();
+}
+
+function closeTripReport() {
+  state.tripOpen = false;
+  el.tripReport.hidden = true;
+  el.routeOpen?.classList.remove('is-active');
+}
+
+/** Aggiorna il tragitto quando cambia la destinazione o la posizione attuale. */
+function refreshRoute({ fit = true } = {}) {
+  if (!state.destination) {
+    clearRoute();
+    return Promise.resolve(false);
+  }
+  return drawRoute({ fit });
 }
 
 /* ---------- route shapes ---------- */
@@ -417,6 +2256,14 @@ function syncTabs() {
     tab.classList.toggle('is-active', active);
     tab.setAttribute('aria-selected', String(active));
   });
+
+  if (el.nearbyBtn) {
+    const active = state.tab === 'stops';
+    el.nearbyBtn.classList.toggle('is-active', active);
+    el.nearbyBtn.title = active
+      ? 'Torna agli autobus'
+      : 'Fermate vicine e prossimi passaggi';
+  }
 }
 
 function renderStats() {
@@ -449,13 +2296,27 @@ function renderList() {
     return;
   }
 
-  const filtered = state.vehicles.filter((v) => {
+  if (state.tab === 'stops') {
+    renderStops();
+    return;
+  }
+
+  let filtered = state.vehicles.filter((v) => {
     if (state.selectedRouteId && v.routeId !== state.selectedRouteId) return false;
     if (state.onlyMoving && v.status !== 'In transito') return false;
     return matchesQuery([v.line, v.label, v.headsign, v.status], tokens);
   });
 
-  if (tokens.length) {
+  if (state.location) {
+    filtered = filtered.map((v) => ({ ...v, distance: haversine(state.location, v) }));
+    filtered.sort((a, b) => {
+      if (tokens.length) {
+        const byRelevance = relevanceRank(a.line, tokens) - relevanceRank(b.line, tokens);
+        if (byRelevance !== 0) return byRelevance;
+      }
+      return a.distance - b.distance;
+    });
+  } else if (tokens.length) {
     filtered.sort(
       (a, b) =>
         relevanceRank(a.line, tokens) - relevanceRank(b.line, tokens) ||
@@ -491,6 +2352,7 @@ function renderList() {
         <span class="bus-main">
           <span class="bus-dest">${esc(v.headsign || 'Destinazione n.d.')}</span>
           <span class="bus-meta">
+            ${state.location ? `<span class="bus-distance">${esc(formatDistance(v.distance))}</span><span class="dot-sep"></span>` : ''}
             <span>vettura ${esc(v.label)}</span>
             <span class="dot-sep"></span>
             <span>${esc(timeAgo(v.timestamp))}</span>
@@ -693,6 +2555,139 @@ function bindEvents() {
     el.search.focus();
   });
 
+  el.locationInput.addEventListener('input', () => {
+    el.clearLocation.hidden = !el.locationInput.value;
+
+    if (!el.locationInput.value.trim()) {
+      if (state.location) clearLocation();
+      else {
+        suggestions = [];
+        closeSuggestions();
+      }
+      return;
+    }
+
+    clearTimeout(suggestionTimer);
+    suggestionTimer = setTimeout(() => fetchSuggestions(el.locationInput.value), 280);
+  });
+
+  el.locationInput.addEventListener('focus', () => {
+    if (suggestions.length && el.locationInput.value.trim().length >= 3) renderSuggestions();
+  });
+
+  el.locationInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeSuggestions();
+      return;
+    }
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!suggestions.length || el.locationSuggestions.hidden) return;
+      event.preventDefault();
+      if (event.key === 'ArrowDown') {
+        activeSuggestion = (activeSuggestion + 1) % suggestions.length;
+      } else {
+        activeSuggestion = activeSuggestion <= 0 ? suggestions.length - 1 : activeSuggestion - 1;
+      }
+      renderSuggestions();
+      el.locationSuggestions.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (suggestions.length && !el.locationSuggestions.hidden) {
+        const place = suggestions[activeSuggestion >= 0 ? activeSuggestion : 0];
+        if (place) setDestination(place);
+        return;
+      }
+      resolveTypedDestination(el.locationInput.value);
+    }
+  });
+
+  el.locationInput.addEventListener('blur', () => {
+    window.setTimeout(closeSuggestions, 140);
+  });
+
+  el.locationSuggestions.addEventListener('pointerdown', (event) => event.preventDefault());
+
+  el.locationSuggestions.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-index]');
+    if (!option) return;
+    const place = suggestions[Number(option.dataset.index)];
+    if (place) setDestination(place);
+  });
+
+  el.routeOpen?.addEventListener('click', () => {
+    if (state.tripViewOpen) closeTripView();
+    else openTripView();
+  });
+
+  el.tripBack?.addEventListener('click', closeTripView);
+  el.tripViewClose?.addEventListener('click', closeTripView);
+
+  el.tripFit?.addEventListener('click', () => {
+    if (!state.tripMap || !state.route?.points?.length) return;
+    state.tripMap.fitBounds(L.latLngBounds(state.route.points), { padding: [40, 40], maxZoom: 16 });
+  });
+
+  document.querySelectorAll('.trip-mode').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.tripTransport = button.dataset.tripMode;
+      document.querySelectorAll('.trip-mode').forEach((other) => {
+        const active = other === button;
+        other.classList.toggle('is-active', active);
+        other.setAttribute('aria-selected', String(active));
+      });
+      renderTripOptions();
+    });
+  });
+
+  el.tripOptions?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-trip-option]');
+    if (!button) return;
+    state.tripMode = button.dataset.tripOption;
+    saveTripMode(state.tripMode);
+    renderTripOptions();
+    renderTripStats();
+    if (state.tripViewOpen) renderTripMap();
+  });
+
+  el.tripClose?.addEventListener('click', closeTripReport);
+
+  el.tripCenter?.addEventListener('click', () => {
+    if (!state.route?.points?.length) return;
+    if (state.tripViewOpen && state.tripMap) {
+      state.tripMap.fitBounds(L.latLngBounds(state.route.points), { padding: [40, 40], maxZoom: 16 });
+      return;
+    }
+    map.fitBounds(L.latLngBounds(state.route.points), { padding: [56, 56], maxZoom: 16 });
+  });
+
+  el.tripBuses?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-trip-line]');
+    if (!button) return;
+    selectRoute(button.dataset.tripLine);
+  });
+
+  el.routeClear?.addEventListener('click', () => {
+    clearDestination();
+    showToast('Tragitto rimosso.');
+  });
+
+  el.locateBtn.addEventListener('click', locateMe);
+
+  el.currentPositionBtn.addEventListener('click', () => detectCurrentPosition());
+  el.currentPositionField.addEventListener('click', (event) => {
+    if (event.target.closest('button')) return;
+    detectCurrentPosition();
+  });
+  el.clearLocation.addEventListener('click', () => {
+    if (state.destination) clearDestination();
+    else clearLocation();
+    el.locationInput.focus();
+  });
+
   el.onlyMoving.addEventListener('change', () => {
     state.onlyMoving = el.onlyMoving.checked;
     renderList();
@@ -700,13 +2695,67 @@ function bindEvents() {
   });
 
   el.list.addEventListener('click', (event) => {
+    if (event.target.closest('#stopsRefresh')) {
+      loadNearbyStops();
+      return;
+    }
+    if (event.target.closest('#stopsLocate')) {
+      locateMe();
+      return;
+    }
+
     const busRow = event.target.closest('[data-vehicle]');
     if (busRow) {
       focusVehicle(busRow.dataset.vehicle);
       return;
     }
     const lineRow = event.target.closest('[data-route]');
-    if (lineRow) selectRoute(lineRow.dataset.route);
+    if (lineRow) {
+      selectRoute(lineRow.dataset.route);
+      return;
+    }
+    const stopRow = event.target.closest('[data-stop]');
+    if (stopRow) focusStop(stopRow.dataset.stop);
+  });
+
+  el.mapStyle?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-style]');
+    if (!button) return;
+    applyMapStyle(button.dataset.style);
+  });
+
+  el.nearbyBtn.addEventListener('click', () => {
+    if (state.tab === 'stops') {
+      state.tab = 'vehicles';
+      syncTabs();
+      renderList();
+      return;
+    }
+    openNearby();
+  });
+
+  // Le tendine native su mobile emettono anche `input`: aggiorniamo il raggio
+  // solo quando cambia davvero, per non ripetere la richiesta due volte.
+  const onRadiusChange = (event) => {
+    if (event.target.id !== 'stopsRadius') return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value) || value === state.stopsRadius) return;
+    state.stopsRadius = value;
+    saveRadius(value);
+    loadNearbyStops();
+  };
+  el.list.addEventListener('change', onRadiusChange);
+  el.list.addEventListener('input', onRadiusChange);
+
+  map.on('popupopen', (event) => {
+    const button = event.popup.getElement()?.querySelector('[data-stop-focus]');
+    if (!button) return;
+    button.addEventListener('click', () => {
+      map.closePopup();
+      state.tab = 'stops';
+      syncTabs();
+      focusStop(button.dataset.stopFocus);
+    });
   });
 
   el.clearSelection.addEventListener('click', clearRouteSelection);
@@ -717,7 +2766,14 @@ function bindEvents() {
     drawShape();
   });
 
-  window.addEventListener('resize', () => map.invalidateSize());
+  window.addEventListener('resize', () => {
+    map.invalidateSize();
+    if (state.tripViewOpen && state.tripMap) state.tripMap.invalidateSize();
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.tripViewOpen) closeTripView();
+  });
 }
 
 /* ---------- boot ---------- */
@@ -732,9 +2788,14 @@ async function boot() {
 
   initMap();
   bindEvents();
+  loadSavedRadius();
+  loadSavedTripMode();
   syncTabs();
   setInterval(tick, 1000);
   tick();
+  applySavedLocation();
+  renderCurrentPosition();
+  detectCurrentPosition({ silent: true });
 
   await Promise.all([loadData(), loadRoutes()]);
   state.nextRefreshAt = Date.now() + REFRESH_MS;

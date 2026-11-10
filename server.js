@@ -4,6 +4,7 @@ import compression from 'compression';
 import { fileURLToPath } from 'node:url';
 import { loadGtfsData } from './src/gtfs.js';
 import { fetchSnapshot } from './src/realtime.js';
+import { NearbyService, StopTimesIndex, loadStops } from './src/nearby.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -15,6 +16,7 @@ app.use(compression());
 app.use(express.static(path.join(ROOT, 'public'), { maxAge: '1h', index: false }));
 
 let staticData = null;
+let nearbyService = null;
 let cache = { data: null, at: 0 };
 let inflight = null;
 
@@ -106,12 +108,40 @@ app.get('/api/routes/:routeId/shape', (req, res) => {
   res.json({ routeId: route.id, name: route.name, segments });
 });
 
+app.get('/api/stops/nearby', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+
+  const lat = Number(req.query.lat);
+  const lon = Number(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    res.status(400).json({ error: 'Parametri lat e lon obbligatori (gradi decimali).' });
+    return;
+  }
+
+  try {
+    const data = await nearbyService.nearby({
+      lat,
+      lon,
+      radius: Number(req.query.radius),
+      limit: Number(req.query.limit),
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     routes: staticData.routes.length,
     lastSnapshot: cache.data?.generatedAt || null,
     stale: Boolean(cache.data?.stale),
+    stops: nearbyService?.stopIndex.stops.length ?? 0,
+    schedule: {
+      status: nearbyService?.stopTimes.status ?? 'idle',
+      updatedAt: nearbyService?.stopTimes.loadedAt ?? null,
+    },
   });
 });
 
@@ -133,6 +163,16 @@ let server = null;
 async function main() {
   staticData = await loadGtfsData();
   console.log('[server] dati statici pronti');
+
+  // L'indice delle fermate è piccolo e serve subito; gli orari (stop_times.txt,
+  // oltre 200 MB) vengono caricati in background alla prima richiesta.
+  const stopIndex = await loadStops();
+  nearbyService = new NearbyService({
+    stopIndex,
+    stopTimes: new StopTimesIndex(),
+    staticData,
+    getSnapshot: () => getSnapshot(),
+  });
   server = app.listen(PORT, () => {
     console.log(`\n  ATAC Bus Live -> http://localhost:${PORT}\n`);
   });
