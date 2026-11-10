@@ -1,0 +1,20 @@
+{
+  "name": "atac-bus-live",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Elenco in tempo reale degli autobus ATAC in circolazione nel comune di Roma",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "express": "^4.22.3",
+    "gtfs-realtime-bindings": "^2.2.0"
+  }
+}

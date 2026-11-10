@@ -1,0 +1,56 @@
+# --- Sistema operativo ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE / editor ---
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# --- .NET / Visual Studio ---
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+BuildResults/
+*.dll
+*.exe
+*.pdb
+*.cache
+*.log
+TestResults/
+*.trx
+*.coverage
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.env
+.env.local
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- File temporanei / dati scaricati ---
+.tmp*
+*.zip
+rtvp.pb
+*.tmp
+*.bak
