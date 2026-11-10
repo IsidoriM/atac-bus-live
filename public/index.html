@@ -184,6 +184,7 @@
           <div class="route-summary" id="routeSummary" hidden>
             <span class="route-dot" aria-hidden="true"></span>
             <span class="route-text" id="routeText">—</span>
+            <button class="route-open" id="routeOpen" type="button" title="Apri il report del percorso">Report</button>
             <button class="route-clear" id="routeClear" type="button" title="Rimuovi il tragitto"
               aria-label="Rimuovi il tragitto">×</button>
           </div>
@@ -302,6 +303,48 @@
         </div>
 
         <div class="toast" id="toast" role="status" hidden></div>
+
+        <aside class="trip-report" id="tripReport" aria-label="Report del percorso" hidden>
+          <header class="trip-head">
+            <div class="trip-head-main">
+              <span class="trip-eyebrow">Report del percorso</span>
+              <strong class="trip-route" id="tripRoute">—</strong>
+            </div>
+            <button class="trip-close" id="tripClose" type="button" aria-label="Chiudi il report">×</button>
+          </header>
+
+          <div class="trip-stats">
+            <div class="trip-stat">
+              <strong id="tripDistance">—</strong>
+              <span>distanza</span>
+            </div>
+            <div class="trip-stat">
+              <strong id="tripDuration">—</strong>
+              <span>a piedi</span>
+            </div>
+            <div class="trip-stat">
+              <strong id="tripArrival">—</strong>
+              <span>arrivo</span>
+            </div>
+          </div>
+
+          <div class="trip-section">
+            <h3 class="trip-section-title">Il tuo percorso</h3>
+            <ol class="trip-steps" id="tripSteps"></ol>
+          </div>
+
+          <div class="trip-section">
+            <h3 class="trip-section-title">Autobus lungo il percorso</h3>
+            <div class="trip-buses" id="tripBuses">
+              <span class="trip-empty">Cerco le linee che passano di qui…</span>
+            </div>
+          </div>
+
+          <footer class="trip-foot">
+            <span id="tripNote">Calcolato ora</span>
+            <button class="btn btn-small" id="tripCenter" type="button">Centra sulla mappa</button>
+          </footer>
+        </aside>
       </section>
     </main>
 

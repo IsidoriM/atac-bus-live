@@ -32,6 +32,8 @@ const state = {
   stopMarkers: new Map(),
   mapStyle: 'osm',
   route: null,
+  routeStops: [],
+  tripOpen: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -59,6 +61,17 @@ const el = {
   currentPositionBtn: $('currentPositionBtn'),
   currentPositionBadge: $('currentPositionBadge'),
   currentPositionCoords: $('currentPositionCoords'),
+  routeOpen: $('routeOpen'),
+  tripReport: $('tripReport'),
+  tripRoute: $('tripRoute'),
+  tripDistance: $('tripDistance'),
+  tripDuration: $('tripDuration'),
+  tripArrival: $('tripArrival'),
+  tripSteps: $('tripSteps'),
+  tripBuses: $('tripBuses'),
+  tripNote: $('tripNote'),
+  tripClose: $('tripClose'),
+  tripCenter: $('tripCenter'),
   routeSummary: $('routeSummary'),
   routeText: $('routeText'),
   routeClear: $('routeClear'),
@@ -1409,8 +1422,10 @@ function clearRoute({ keepSummary = false } = {}) {
   routeController?.abort();
   routeController = null;
   state.route = null;
+  state.routeStops = [];
   ensureRouteLayer().clearLayers();
   if (!keepSummary) renderRouteSummary();
+  if (state.tripOpen) closeTripReport();
 }
 
 /**
@@ -1471,8 +1486,12 @@ async function drawRoute({ fit = true } = {}) {
       duration: best.duration,
       from: { lat: from.lat, lon: from.lon },
       to: { lat: to.lat, lon: to.lon },
+      points,
     };
     renderRouteSummary();
+
+    // Se il report è aperto, lo aggiorna con il nuovo tragitto.
+    if (state.tripOpen) openTripReport();
 
     if (fit) map.fitBounds(line.getBounds(), { padding: [56, 56], maxZoom: 16 });
     return true;
@@ -1484,6 +1503,189 @@ async function drawRoute({ fit = true } = {}) {
   } finally {
     if (routeController === controller) routeController = null;
   }
+}
+
+/* ---------- report del percorso ---------- */
+
+/**
+ * Fermate ATAC entro ~220 m dalla polilinea del tragitto: sono i punti di
+ * salita e discesa possibili, come nelle app di navigazione.
+ */
+async function findStopsAlongRoute(points) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+
+  const step = Math.max(1, Math.floor(points.length / 8));
+  const sampled = [];
+  for (let i = 0; i < points.length; i += step) sampled.push(points[i]);
+  const last = points[points.length - 1];
+  if (sampled[sampled.length - 1] !== last) sampled.push(last);
+
+  const found = new Map();
+  await Promise.all(
+    sampled.map(async ([lat, lon]) => {
+      try {
+        const url = `/api/stops/nearby?lat=${lat}&lon=${lon}&radius=220&limit=6`;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const stop of data.stops || []) {
+          const current = found.get(stop.id);
+          if (!current || stop.distance < current.distance) {
+            found.set(stop.id, { ...stop, alongDistance: stop.distance });
+          }
+        }
+      } catch {
+        /* un campione fallito non blocca il report */
+      }
+    }),
+  );
+
+  return [...found.values()]
+    .sort((a, b) => a.alongDistance - b.alongDistance)
+    .slice(0, 4);
+}
+
+/** Righe del report: partenza, fermate utili, arrivo. */
+function renderTripSteps() {
+  const route = state.route;
+  if (!route) {
+    el.tripSteps.innerHTML = '';
+    return;
+  }
+
+  const dest = destinationLabel();
+  const stops = state.routeStops || [];
+
+  const steps = [];
+  steps.push(`
+    <li class="trip-step" data-kind="start">
+      <span class="trip-step-icon" aria-hidden="true">A</span>
+      <span class="trip-step-main">
+        <strong>Parti da ${esc(dest)}</strong>
+        <span>${esc(formatDistance(route.distance))} a piedi fino alla posizione attuale</span>
+      </span>
+    </li>`);
+
+  for (const stop of stops) {
+    const lines = (stop.lines || []).slice(0, 3);
+    steps.push(`
+      <li class="trip-step" data-kind="stop">
+        <span class="trip-step-icon" aria-hidden="true">·</span>
+        <span class="trip-step-main">
+          <strong>Fermata ${esc(stop.name)}</strong>
+          <span>${esc(formatDistance(stop.alongDistance))} dal percorso${
+            lines.length ? ` · ${lines.map((l) => esc(l.line)).join(' · ')}` : ''
+          }</span>
+        </span>
+      </li>`);
+  }
+
+  steps.push(`
+    <li class="trip-step" data-kind="end">
+      <span class="trip-step-icon" aria-hidden="true">B</span>
+      <span class="trip-step-main">
+        <strong>Arrivi alla tua posizione</strong>
+        <span>${esc(state.gps?.label || state.location?.label || 'Posizione attuale')}</span>
+      </span>
+    </li>`);
+
+  el.tripSteps.innerHTML = steps.join('');
+}
+
+/** Elenco delle linee che passano dalle fermate lungo il percorso. */
+function renderTripBuses() {
+  const stops = state.routeStops || [];
+  const byRoute = new Map();
+
+  for (const stop of stops) {
+    for (const line of stop.lines || []) {
+      const current = byRoute.get(line.routeId);
+      const wait = Number.isFinite(line.waitMinutes) ? line.waitMinutes : null;
+      if (!current) {
+        byRoute.set(line.routeId, {
+          routeId: line.routeId,
+          line: line.line,
+          headsign: line.headsign || '',
+          waitMinutes: wait,
+          activeBuses: line.activeBuses || 0,
+          stopName: stop.name,
+        });
+        continue;
+      }
+      if (wait !== null && (current.waitMinutes === null || wait < current.waitMinutes)) {
+        current.waitMinutes = wait;
+        current.headsign = line.headsign || current.headsign;
+        current.stopName = stop.name;
+      }
+      current.activeBuses = Math.max(current.activeBuses, line.activeBuses || 0);
+    }
+  }
+
+  const lines = [...byRoute.values()]
+    .sort((a, b) => {
+      const wa = a.waitMinutes ?? Infinity;
+      const wb = b.waitMinutes ?? Infinity;
+      if (wa !== wb) return wa - wb;
+      return compareLines(a.line, b.line);
+    })
+    .slice(0, 6);
+
+  if (!lines.length) {
+    el.tripBuses.innerHTML =
+      '<span class="trip-empty">Nessuna linea ATAC rilevata lungo questo percorso.</span>';
+    return;
+  }
+
+  el.tripBuses.innerHTML = lines
+    .map(
+      (l) => `
+      <button class="trip-bus" type="button" data-trip-line="${esc(l.routeId)}"
+        title="Mostra la linea ${esc(l.line)} sulla mappa">
+        <span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>
+        <span class="trip-bus-main">
+          <span class="trip-bus-dest">${esc(l.headsign || 'Destinazione n.d.')}</span>
+          <span class="trip-bus-meta">${esc(l.stopName)}${
+            l.activeBuses ? ` · ${l.activeBuses} in linea` : ''
+          }</span>
+        </span>
+        <span class="trip-bus-wait">${esc(formatWait(l.waitMinutes))}</span>
+      </button>`,
+    )
+    .join('');
+}
+
+/** Apre il pannello con il report completo del percorso. */
+async function openTripReport() {
+  const route = state.route;
+  if (!route) {
+    showToast('Scegli prima una destinazione in «Dove vuoi andare».');
+    return;
+  }
+
+  state.tripOpen = true;
+  el.tripReport.hidden = false;
+  el.routeOpen?.classList.add('is-active');
+
+  const arrival = new Date(Date.now() + (route.duration || 0) * 1000);
+  el.tripRoute.textContent = `${destinationLabel()} → ${state.gps?.label || state.location?.label || 'posizione attuale'}`;
+  el.tripDistance.textContent = formatDistance(route.distance) || '—';
+  el.tripDuration.textContent = formatDuration(route.duration) || '—';
+  el.tripArrival.textContent = timeRome(arrival).slice(0, 5);
+  el.tripNote.textContent = `Calcolato alle ${timeRome()}`;
+  renderTripSteps();
+  el.tripBuses.innerHTML = '<span class="trip-empty">Cerco le linee che passano di qui…</span>';
+
+  const stops = await findStopsAlongRoute(route.points || []);
+  if (!state.tripOpen || state.route !== route) return;
+  state.routeStops = stops;
+  renderTripSteps();
+  renderTripBuses();
+}
+
+function closeTripReport() {
+  state.tripOpen = false;
+  el.tripReport.hidden = true;
+  el.routeOpen?.classList.remove('is-active');
 }
 
 /** Aggiorna il tragitto quando cambia la destinazione o la posizione attuale. */
@@ -1986,6 +2188,24 @@ function bindEvents() {
     if (!option) return;
     const place = suggestions[Number(option.dataset.index)];
     if (place) setDestination(place);
+  });
+
+  el.routeOpen?.addEventListener('click', () => {
+    if (state.tripOpen) closeTripReport();
+    else openTripReport();
+  });
+
+  el.tripClose?.addEventListener('click', closeTripReport);
+
+  el.tripCenter?.addEventListener('click', () => {
+    if (!state.route?.points?.length) return;
+    map.fitBounds(L.latLngBounds(state.route.points), { padding: [56, 56], maxZoom: 16 });
+  });
+
+  el.tripBuses?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-trip-line]');
+    if (!button) return;
+    selectRoute(button.dataset.tripLine);
   });
 
   el.routeClear?.addEventListener('click', () => {
