@@ -18,6 +18,17 @@ const state = {
   nextRefreshAt: 0,
   shapes: new Map(),
   shapesVisible: true,
+  location: null,
+  gps: null,
+  gpsState: 'idle',
+  stops: [],
+  stopsAt: null,
+  stopsRadius: 500,
+  stopsLoading: false,
+  stopsError: null,
+  stopsSchedule: null,
+  selectedStopId: null,
+  stopMarkers: new Map(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -32,8 +43,22 @@ const el = {
   refreshBtn: $('refreshBtn'),
   tabVehicleCount: $('tabVehicleCount'),
   tabLineCount: $('tabLineCount'),
+  tabStopCount: $('tabStopCount'),
   search: $('searchInput'),
   clearSearch: $('clearSearch'),
+  locationField: $('locationField'),
+  locationInput: $('locationInput'),
+  locationSuggestions: $('locationSuggestions'),
+  locateBtn: $('locateBtn'),
+  clearLocation: $('clearLocation'),
+  currentPositionField: $('currentPositionField'),
+  currentPositionInput: $('currentPositionInput'),
+  currentPositionBtn: $('currentPositionBtn'),
+  currentPositionBadge: $('currentPositionBadge'),
+  currentPositionCoords: $('currentPositionCoords'),
+  currentPositionPlace: $('currentPositionPlace'),
+  currentPositionPlaceName: $('currentPositionPlaceName'),
+  currentPositionPlaceDetail: $('currentPositionPlaceDetail'),
   onlyMoving: $('onlyMoving'),
   selectionBanner: $('selectionBanner'),
   selLine: $('selLine'),
@@ -45,6 +70,7 @@ const el = {
   list: $('list'),
   footCount: $('footCount'),
   fitBtn: $('fitBtn'),
+  nearbyBtn: $('nearbyBtn'),
   toggleShape: $('toggleShape'),
   toggleShapeText: $('toggleShapeText'),
   mapStatus: $('mapStatus'),
@@ -286,6 +312,803 @@ function fitShape(routeId) {
   return true;
 }
 
+/* ---------- location search ---------- */
+
+const GEOCODE_ENDPOINT = 'https://photon.komoot.io/api/';
+const ROME_CENTER = { lat: 41.9028, lon: 12.4964 };
+const ROME_BBOX = '11.9,41.6,12.9,42.1';
+const LOCATION_STORAGE_KEY = 'atac-bus-live.location';
+
+let locationMarker = null;
+let suggestionTimer = null;
+let suggestionController = null;
+let suggestions = [];
+let activeSuggestion = -1;
+
+function haversine(a, b) {
+  const radius = 6_371_000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * radius * Math.asin(Math.sqrt(h));
+}
+
+function formatDistance(meters) {
+  if (!Number.isFinite(meters)) return '';
+  if (meters < 950) return `${Math.max(10, Math.round(meters / 10) * 10)} m`;
+  return `${(meters / 1000).toFixed(1).replace('.', ',')} km`;
+}
+
+function formatWait(minutes) {
+  if (!Number.isFinite(minutes)) return '';
+  if (minutes <= 0) return 'in arrivo';
+  if (minutes === 1) return '1 min';
+  return `${minutes} min`;
+}
+
+function placeFromFeature(feature) {
+  const p = feature?.properties || {};
+  const coords = feature?.geometry?.coordinates;
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+
+  const lat = Number(coords[1]);
+  const lon = Number(coords[0]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const street = [p.street, p.housenumber].filter(Boolean).join(' ');
+  const title = [p.name, p.housenumber].filter(Boolean).join(' ') || street || p.city || 'Luogo';
+  const detailParts = [];
+  if (street && street !== title) detailParts.push(street);
+  if (p.city && p.city !== title) detailParts.push(p.city);
+  if (p.postcode) detailParts.push(p.postcode);
+
+  return {
+    lat,
+    lon,
+    title,
+    street: p.street || (p.osm_key === 'highway' ? p.name : '') || '',
+    detail: detailParts.join(' · '),
+    label: [title, p.city && p.city !== title ? p.city : ''].filter(Boolean).join(', '),
+  };
+}
+
+function closeSuggestions() {
+  el.locationSuggestions.hidden = true;
+  el.locationInput.setAttribute('aria-expanded', 'false');
+  el.locationInput.removeAttribute('aria-activedescendant');
+  activeSuggestion = -1;
+}
+
+function renderSuggestions() {
+  if (!suggestions.length) {
+    el.locationSuggestions.innerHTML = '<div class="location-empty">Nessun risultato</div>';
+  } else {
+    el.locationSuggestions.innerHTML = suggestions
+      .map(
+        (place, index) => `
+        <button class="location-suggestion${index === activeSuggestion ? ' is-active' : ''}" type="button"
+          role="option" id="loc-opt-${index}" data-index="${index}"
+          aria-selected="${index === activeSuggestion}">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
+              fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            <circle cx="12" cy="10" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/>
+          </svg>
+          <span class="loc-main">
+            <span class="loc-title">${esc(place.title)}</span>
+            ${place.detail ? `<span class="loc-sub">${esc(place.detail)}</span>` : ''}
+          </span>
+        </button>`,
+      )
+      .join('');
+  }
+
+  el.locationSuggestions.hidden = false;
+  el.locationInput.setAttribute('aria-expanded', 'true');
+  if (activeSuggestion >= 0) {
+    el.locationInput.setAttribute('aria-activedescendant', `loc-opt-${activeSuggestion}`);
+  } else {
+    el.locationInput.removeAttribute('aria-activedescendant');
+  }
+}
+
+async function fetchSuggestions(query) {
+  const term = query.trim();
+  if (term.length < 3) {
+    suggestions = [];
+    closeSuggestions();
+    return;
+  }
+
+  suggestionController?.abort();
+  const controller = new AbortController();
+  suggestionController = controller;
+
+  const url = new URL(GEOCODE_ENDPOINT);
+  url.searchParams.set('q', term);
+  url.searchParams.set('limit', '7');
+  url.searchParams.set('lat', String(ROME_CENTER.lat));
+  url.searchParams.set('lon', String(ROME_CENTER.lon));
+  url.searchParams.set('bbox', ROME_BBOX);
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (controller.signal.aborted) return;
+
+    suggestions = (data.features || []).map(placeFromFeature).filter(Boolean).slice(0, 7);
+    activeSuggestion = -1;
+    if (document.activeElement === el.locationInput) renderSuggestions();
+    else closeSuggestions();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    suggestions = [];
+    if (document.activeElement === el.locationInput) {
+      el.locationSuggestions.innerHTML =
+        '<div class="location-empty">Ricerca non disponibile, riprova tra poco</div>';
+      el.locationSuggestions.hidden = false;
+    }
+  }
+}
+
+async function reverseGeocode(lat, lon) {
+  const buildUrl = (streetOnly) => {
+    const url = new URL('https://photon.komoot.io/reverse');
+    url.searchParams.set('lat', String(lat));
+    url.searchParams.set('lon', String(lon));
+    url.searchParams.set('limit', '1');
+    if (streetOnly) url.searchParams.set('osm_tag', 'highway');
+    return url;
+  };
+
+  for (const streetOnly of [true, false]) {
+    try {
+      const res = await fetch(buildUrl(streetOnly), { headers: { Accept: 'application/json' } });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const feature = (data.features || [])[0];
+      const place = feature ? placeFromFeature(feature) : null;
+      if (place) return { ...place, feature };
+    } catch {
+      /* riprova senza filtro oppure usa il fallback */
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Trasforma una feature Photon in un indirizzo leggibile:
+ * `{ name, detail }` — es. { name: 'Piazza dei Cinquecento', detail: 'Esquilino · Roma' }.
+ */
+function describePlace(feature) {
+  if (!feature) return null;
+  const p = feature.properties || {};
+  // Prima la via (con il civico), poi eventuali luoghi notevoli, infine la località.
+  // Su una via senza civico il nome OSM sta in `name`: in quel caso è la via.
+  const isStreet = p.osm_key === 'highway' || p.type === 'street';
+  const name =
+    [p.street, p.housenumber].filter(Boolean).join(' ') ||
+    (isStreet ? p.name : '') ||
+    p.name ||
+    p.locality ||
+    p.city ||
+    '';
+  // Il campo `name` di Photon a volte contiene un nome interno: lo si usa solo
+  // come dettaglio, mai come etichetta principale se c'è già la via.
+  const detailName = p.name && p.name !== name ? p.name : '';
+  const detailParts = [];
+  if (detailName) detailParts.push(detailName);
+  if (p.district && p.district !== name) detailParts.push(p.district);
+  if (p.locality && p.locality !== name) detailParts.push(p.locality);
+  if (p.city && p.city !== name) detailParts.push(p.city);
+  if (!name && !detailParts.length) return null;
+  return {
+    name: name || detailParts[0],
+    detail: detailParts.filter((part) => part !== name).join(' · '),
+  };
+}
+
+/**
+ * Aggiorna la casella "La tua posizione attuale".
+ * `gpsState`: idle | locating | ready | denied | unavailable | timeout
+ */
+function renderCurrentPosition() {
+  if (!el.currentPositionInput) return;
+
+  const states = {
+    idle: 'non rilevata',
+    locating: 'rilevamento…',
+    ready: 'rilevata',
+    denied: 'permesso negato',
+    unavailable: 'non disponibile',
+    timeout: 'tempo scaduto',
+  };
+
+  el.currentPositionBadge.dataset.state = state.gpsState;
+  el.currentPositionBadge.textContent = states[state.gpsState] || states.idle;
+
+  const gps = state.gps;
+  if (gps) {
+    el.currentPositionInput.value = gps.label || `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`;
+    el.currentPositionField.classList.add('is-located');
+    el.currentPositionCoords.textContent =
+      `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}` +
+      (gps.accuracy ? ` · ±${Math.round(gps.accuracy)} m` : '') +
+      (gps.at ? ` · ${timeRome(new Date(gps.at))}` : '');
+
+    const placeTitle =
+      gps.placeName && gps.placeName !== gps.label ? gps.placeName : '';
+    if (placeTitle || gps.placeDetail) {
+      el.currentPositionPlaceName.textContent = placeTitle || gps.label || '';
+      el.currentPositionPlaceDetail.textContent = gps.placeDetail || '';
+      el.currentPositionPlace.hidden = false;
+    } else {
+      el.currentPositionPlace.hidden = true;
+    }
+  } else if (state.gpsState === 'locating') {
+    el.currentPositionInput.value = 'Rilevo la posizione…';
+    el.currentPositionField.classList.remove('is-located');
+    el.currentPositionCoords.textContent = '';
+    el.currentPositionPlace.hidden = true;
+  } else {
+    el.currentPositionInput.value = 'Posizione non rilevata';
+    el.currentPositionField.classList.remove('is-located');
+    el.currentPositionCoords.textContent = '';
+    el.currentPositionPlace.hidden = true;
+  }
+
+  el.currentPositionBtn.classList.toggle('is-loading', state.gpsState === 'locating');
+}
+
+/** Rileva la posizione del browser e la usa per l'app (bus e fermate vicine). */
+function detectCurrentPosition({ silent = false } = {}) {
+  if (!navigator.geolocation) {
+    state.gpsState = 'unavailable';
+    renderCurrentPosition();
+    if (!silent) showToast('La geolocalizzazione non è supportata da questo browser.');
+    return;
+  }
+
+  state.gpsState = 'locating';
+  renderCurrentPosition();
+
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const { latitude, longitude, accuracy } = position.coords;
+      state.gps = {
+        lat: latitude,
+        lon: longitude,
+        accuracy: Number.isFinite(accuracy) ? accuracy : null,
+        label: `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
+        at: Date.now(),
+      };
+      state.gpsState = 'ready';
+      renderCurrentPosition();
+
+      // La casella mostra subito le coordinate, poi la via esatta.
+      setLocation({ lat: latitude, lon: longitude, label: state.gps.label });
+
+      let place = null;
+      try {
+        place = await reverseGeocode(latitude, longitude);
+      } catch {
+        /* senza reverse geocoding restano le coordinate */
+      }
+
+      const described = describePlace(place?.feature) || null;
+      if (described) {
+        state.gps.placeName = described.name;
+        state.gps.placeDetail = described.detail;
+      }
+
+      if (place?.street || place?.title) {
+        const label = described?.name || place.street || place.title;
+        state.gps.label = label;
+        renderCurrentPosition();
+        if (state.location) {
+          state.location.label = label;
+          el.locationInput.value = label;
+          try {
+            localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(state.location));
+          } catch {
+            /* storage non disponibile */
+          }
+        }
+      }
+
+      if (!silent) showToast(`Posizione attuale: ${state.gps.label}`);
+    },
+    (error) => {
+      state.gpsState = error.code === 1 ? 'denied' : error.code === 3 ? 'timeout' : 'unavailable';
+      renderCurrentPosition();
+      if (silent) return;
+      const messages = {
+        1: 'Permesso di geolocalizzazione negato.',
+        2: 'Posizione non disponibile.',
+        3: 'Tempo scaduto durante il rilevamento della posizione.',
+      };
+      showToast(messages[error.code] || 'Impossibile rilevare la posizione attuale.');
+    },
+    { enableHighAccuracy: true, timeout: 10_000, maximumAge: 30_000 },
+  );
+}
+
+function renderLocationMarker() {
+  if (!state.location) {
+    if (locationMarker) {
+      locationMarker.remove();
+      locationMarker = null;
+    }
+    return;
+  }
+
+  const latlng = [state.location.lat, state.location.lon];
+  if (!locationMarker) {
+    locationMarker = L.circleMarker(latlng, {
+      radius: 8,
+      color: '#ffffff',
+      weight: 2.5,
+      opacity: 1,
+      fillColor: '#3d8bff',
+      fillOpacity: 1,
+      className: 'user-location-marker',
+    })
+      .addTo(map)
+      .bindTooltip('La tua posizione', {
+        className: 'bus-tooltip',
+        direction: 'top',
+        offset: [0, -10],
+        opacity: 1,
+      });
+  } else {
+    locationMarker.setLatLng(latlng);
+  }
+  locationMarker.bringToFront();
+}
+
+function setLocation(place, { fly = true, save = true } = {}) {
+  state.location = {
+    lat: place.lat,
+    lon: place.lon,
+    label: place.label || place.title || 'Posizione',
+  };
+
+  el.locationInput.value = state.location.label;
+  el.locationField.classList.add('is-located');
+  el.clearLocation.hidden = false;
+  el.locateBtn.classList.remove('is-loading');
+  suggestions = [];
+  closeSuggestions();
+  renderLocationMarker();
+
+  if (save) {
+    try {
+      localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(state.location));
+    } catch {
+      /* storage non disponibile */
+    }
+  }
+
+  el.list.scrollTop = 0;
+  invalidateStops();
+  renderList();
+  if (fly) map.flyTo([place.lat, place.lon], Math.max(map.getZoom(), 15), { duration: 0.9 });
+}
+
+/** La posizione è cambiata: le fermate vicine non valgono più. */
+function invalidateStops() {
+  state.stops = [];
+  state.stopsAt = null;
+  state.selectedStopId = null;
+  state.stopsSchedule = null;
+  state.stopsError = null;
+  ensureStopLayer().clearLayers();
+  state.stopMarkers = new Map();
+  if (state.tab === 'stops') {
+    loadNearbyStops({ silent: true });
+  } else {
+    renderStops();
+  }
+}
+
+function applySavedLocation() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(LOCATION_STORAGE_KEY) || 'null');
+  } catch {
+    saved = null;
+  }
+
+  if (
+    !saved ||
+    !Number.isFinite(Number(saved.lat)) ||
+    !Number.isFinite(Number(saved.lon)) ||
+    !saved.label
+  ) {
+    return;
+  }
+
+  setLocation(
+    { lat: Number(saved.lat), lon: Number(saved.lon), label: saved.label },
+    { fly: false, save: false },
+  );
+}
+
+function clearLocation() {
+  state.location = null;
+  el.locationInput.value = '';
+  el.locationField.classList.remove('is-located');
+  el.clearLocation.hidden = true;
+  el.locateBtn.classList.remove('is-loading');
+  suggestions = [];
+  closeSuggestions();
+  renderLocationMarker();
+  try {
+    localStorage.removeItem(LOCATION_STORAGE_KEY);
+  } catch {
+    /* storage non disponibile */
+  }
+  invalidateStops();
+  renderList();
+}
+
+function restoreLocationLabel(previous) {
+  if (previous) {
+    el.locationInput.value = previous.label;
+    el.locationField.classList.add('is-located');
+    el.clearLocation.hidden = false;
+  } else {
+    el.locationInput.value = '';
+    el.locationField.classList.remove('is-located');
+    el.clearLocation.hidden = true;
+  }
+}
+
+function locateMe() {
+  const previous = state.location ? { ...state.location } : null;
+
+  // Aggiorna subito la casella al click; la posizione esatta arriva appena disponibile.
+  clearTimeout(suggestionTimer);
+  suggestions = [];
+  closeSuggestions();
+  el.locationInput.value = 'Posizione attuale…';
+  el.locationField.classList.add('is-located');
+
+  useCurrentPosition({ previous });
+}
+
+async function useCurrentPosition({ silent = false, previous = null } = {}) {
+  if (!navigator.geolocation) {
+    if (!silent) {
+      restoreLocationLabel(previous);
+      showToast('La geolocalizzazione non è supportata da questo browser.');
+    }
+    return;
+  }
+
+  el.locateBtn.classList.add('is-loading');
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const { latitude, longitude } = position.coords;
+      const coordsLabel = `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+
+      // Mostra subito un valore nella casella, poi lo sostituisce con la via esatta.
+      el.locationInput.value = coordsLabel;
+      el.locationField.classList.add('is-located');
+      el.clearLocation.hidden = false;
+
+      let place = null;
+      try {
+        place = await reverseGeocode(latitude, longitude);
+      } catch {
+        /* senza reverse geocoding mostriamo comunque la posizione */
+      }
+
+      setLocation({
+        lat: latitude,
+        lon: longitude,
+        label: place?.street || place?.title || coordsLabel,
+      });
+
+      if (!silent) {
+        showToast(place?.street ? `Posizione impostata: ${place.street}` : 'Posizione attuale rilevata.');
+      }
+    },
+    (error) => {
+      el.locateBtn.classList.remove('is-loading');
+      if (silent) return;
+      restoreLocationLabel(previous);
+      const messages = {
+        1: 'Permesso di geolocalizzazione negato.',
+        2: 'Posizione non disponibile.',
+        3: 'Tempo scaduto durante il rilevamento della posizione.',
+      };
+      showToast(messages[error.code] || 'Impossibile rilevare la posizione attuale.');
+    },
+    { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+  );
+}
+
+/* ---------- fermate vicine ---------- */
+
+let stopLayer = null;
+let nearbyController = null;
+
+const NEARBY_RADIUS_KEY = 'atac-bus-live.nearby-radius';
+
+function loadSavedRadius() {
+  try {
+    const saved = Number(localStorage.getItem(NEARBY_RADIUS_KEY));
+    if (Number.isFinite(saved) && saved >= 100 && saved <= 2000) state.stopsRadius = saved;
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+function saveRadius(value) {
+  try {
+    localStorage.setItem(NEARBY_RADIUS_KEY, String(value));
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+function ensureStopLayer() {
+  if (stopLayer) return stopLayer;
+  stopLayer = L.layerGroup().addTo(map);
+  return stopLayer;
+}
+
+function stopIcon(stop) {
+  const selected = stop.id === state.selectedStopId;
+  return L.divIcon({
+    className: 'stop-marker-wrap',
+    html: `<span class="stop-marker${selected ? ' is-selected' : ''}"></span>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+  });
+}
+
+function stopPopupHtml(stop) {
+  const lines = stop.lines.length
+    ? stop.lines
+        .map(
+          (l) => `
+          <li class="stop-line">
+            <span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>
+            <span class="stop-line-main">
+              <span class="stop-line-dest">${esc(l.headsign || 'Destinazione n.d.')}</span>
+              <span class="stop-line-meta">
+                ${l.activeBuses ? `${l.activeBuses} ${l.activeBuses === 1 ? 'bus in linea' : 'bus in linea'}` : 'nessun bus in linea'}
+                ${l.nearestBusMeters !== null ? ` · più vicino ${esc(formatDistance(l.nearestBusMeters))}` : ''}
+              </span>
+            </span>
+            <span class="stop-wait">${esc(formatWait(l.waitMinutes))}</span>
+          </li>`,
+        )
+        .join('')
+    : '<li class="stop-line stop-line-empty">Orari non disponibili per questa fermata</li>';
+
+  return `
+    <div class="popup">
+      <div class="popup-head">
+        <span class="popup-dest">${esc(stop.name)}</span>
+      </div>
+      <div class="popup-sub">${esc(formatDistance(stop.distance))} da te · fermata ${esc(stop.code || stop.id)}</div>
+      <ul class="stop-lines">${lines}</ul>
+      <button class="popup-btn" type="button" data-stop-focus="${esc(stop.id)}">
+        Vedi tutti i passaggi
+      </button>
+    </div>`;
+}
+
+function renderStopMarkers() {
+  const layer = ensureStopLayer();
+  layer.clearLayers();
+  state.stopMarkers = new Map();
+
+  for (const stop of state.stops) {
+    const marker = L.marker([stop.lat, stop.lon], {
+      icon: stopIcon(stop),
+      keyboard: false,
+      title: stop.name,
+    })
+      .addTo(layer)
+      .bindPopup(() => stopPopupHtml(stop), { maxWidth: 300, minWidth: 250 });
+
+    marker.on('click', () => {
+      state.selectedStopId = stop.id;
+      renderStops();
+      renderStopMarkers();
+    });
+
+    state.stopMarkers.set(stop.id, marker);
+  }
+}
+
+async function loadNearbyStops({ silent = false } = {}) {
+  if (!state.location) {
+    if (!silent) showToast('Imposta prima la tua posizione o usa la geolocalizzazione.');
+    return;
+  }
+
+  nearbyController?.abort();
+  const controller = new AbortController();
+  nearbyController = controller;
+
+  state.stopsLoading = true;
+  state.stopsError = null;
+  renderStops();
+
+  const url = new URL('/api/stops/nearby', window.location.origin);
+  url.searchParams.set('lat', String(state.location.lat));
+  url.searchParams.set('lon', String(state.location.lon));
+  url.searchParams.set('radius', String(state.stopsRadius));
+  url.searchParams.set('limit', '8');
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (controller.signal.aborted) return;
+
+    state.stops = (data.stops || []).map((stop) => ({
+      ...stop,
+      lines: [...(stop.lines || [])].sort(
+        (a, b) => a.waitMinutes - b.waitMinutes || compareLines(a.line, b.line),
+      ),
+    }));
+    state.stopsAt = new Date();
+    state.stopsSchedule = data.schedule || null;
+    if (!state.stops.some((s) => s.id === state.selectedStopId)) state.selectedStopId = null;
+
+    renderStops();
+    renderStopMarkers();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    state.stopsError = err.message;
+    state.stops = [];
+    ensureStopLayer().clearLayers();
+    state.stopMarkers = new Map();
+    renderStops();
+  } finally {
+    if (nearbyController === controller) nearbyController = null;
+    state.stopsLoading = false;
+    renderStops();
+  }
+}
+
+function renderStops() {
+  el.tabStopCount.textContent = state.stops.length.toLocaleString('it-IT');
+  if (state.tab !== 'stops') return;
+
+  el.listTitle.textContent = 'Fermate vicine';
+  el.listCount.textContent = state.stops.length.toLocaleString('it-IT');
+
+  if (!state.location) {
+    el.list.innerHTML = emptyStopsState(
+      'Imposta la tua posizione',
+      'Cerca un indirizzo, tocca il mirino o trascina la mappa e premi «Fermate qui».',
+      true,
+    );
+    return;
+  }
+
+  if (state.stopsLoading && !state.stops.length) {
+    el.list.innerHTML = `
+      <div class="list-loading">
+        <span class="spinner" aria-hidden="true"></span>
+        Cerco le fermate vicine…
+      </div>`;
+    return;
+  }
+
+  if (state.stopsError) {
+    el.list.innerHTML = emptyStopsState('Ricerca non riuscita', state.stopsError);
+    return;
+  }
+
+  if (!state.stops.length) {
+    el.list.innerHTML = emptyStopsState(
+      'Nessuna fermata vicina',
+      `Non ci sono fermate ATAC entro ${formatDistance(state.stopsRadius)}. Allarga il raggio di ricerca.`,
+    );
+    return;
+  }
+
+  const scheduleNote = state.stopsSchedule?.ready
+    ? `orari aggiornati ${state.stopsSchedule.updatedAt ? timeRome(new Date(state.stopsSchedule.updatedAt)) : ''}`
+    : 'orari in caricamento…';
+
+  const rows = state.stops.map((stop) => {
+    const lines = stop.lines.length
+      ? stop.lines
+          .map(
+            (l) => `
+            <span class="stop-chip" title="${esc(l.headsign || '')}">
+              <span class="line-chip" style="${chipStyle(l.line)}">${esc(l.line)}</span>
+              <span class="stop-chip-wait">${esc(formatWait(l.waitMinutes))}</span>
+              ${l.activeBuses ? '<span class="stop-chip-live" aria-label="bus in linea"></span>' : ''}
+            </span>`,
+          )
+          .join('')
+      : '<span class="stop-no-lines">orari non disponibili</span>';
+
+    return `
+      <button class="stop-row${stop.id === state.selectedStopId ? ' is-selected' : ''}" type="button"
+        role="listitem" data-stop="${esc(stop.id)}" title="${esc(stop.name)}">
+        <span class="stop-main">
+          <span class="stop-name">${esc(stop.name)}</span>
+          <span class="stop-meta">${esc(formatDistance(stop.distance))} · fermata ${esc(stop.code || stop.id)}</span>
+          <span class="stop-chips">${lines}</span>
+        </span>
+        <span class="stop-arrow" aria-hidden="true">›</span>
+      </button>`;
+  });
+
+  el.list.innerHTML = `
+    <div class="stops-toolbar">
+      <span class="stops-radius-label">Raggio</span>
+      <select id="stopsRadius" class="stops-radius" aria-label="Raggio di ricerca">
+        ${[250, 500, 1000, 2000]
+          .map(
+            (r) =>
+              `<option value="${r}"${r === state.stopsRadius ? ' selected' : ''}>${formatDistance(r)}</option>`,
+          )
+          .join('')}
+      </select>
+      <button class="btn btn-small" id="stopsRefresh" type="button">Aggiorna</button>
+    </div>
+    <div class="stops-note">${esc(scheduleNote)}</div>
+    ${rows.join('')}`;
+}
+
+function emptyStopsState(title, message, withButton = false) {
+  return `
+    <div class="empty">
+      <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true">
+        <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
+          fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+        <circle cx="12" cy="10" r="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      </svg>
+      <strong>${esc(title)}</strong>
+      <span>${esc(message)}</span>
+      ${withButton ? '<button class="btn btn-small" id="stopsLocate" type="button">Usa la mia posizione</button>' : ''}
+    </div>`;
+}
+
+function focusStop(stopId) {
+  const stop = state.stops.find((s) => s.id === stopId);
+  if (!stop) return;
+  state.selectedStopId = stopId;
+  renderStops();
+  renderStopMarkers();
+  map.flyTo([stop.lat, stop.lon], Math.max(map.getZoom(), 16), { duration: 0.7 });
+  const marker = state.stopMarkers.get(stopId);
+  if (marker) window.setTimeout(() => marker.openPopup(), 400);
+}
+
+function openNearby() {
+  state.tab = 'stops';
+  syncTabs();
+  renderStops();
+
+  if (!state.location) {
+    showToast('Cerca la tua posizione o tocca il mirino per vedere le fermate vicine.');
+    el.locationInput.focus();
+    return;
+  }
+  if (!state.stops.length && !state.stopsLoading) loadNearbyStops();
+}
+
 /* ---------- route shapes ---------- */
 
 async function fetchShape(routeId) {
@@ -417,6 +1240,14 @@ function syncTabs() {
     tab.classList.toggle('is-active', active);
     tab.setAttribute('aria-selected', String(active));
   });
+
+  if (el.nearbyBtn) {
+    const active = state.tab === 'stops';
+    el.nearbyBtn.classList.toggle('is-active', active);
+    el.nearbyBtn.title = active
+      ? 'Torna agli autobus'
+      : 'Fermate vicine e prossimi passaggi';
+  }
 }
 
 function renderStats() {
@@ -449,13 +1280,27 @@ function renderList() {
     return;
   }
 
-  const filtered = state.vehicles.filter((v) => {
+  if (state.tab === 'stops') {
+    renderStops();
+    return;
+  }
+
+  let filtered = state.vehicles.filter((v) => {
     if (state.selectedRouteId && v.routeId !== state.selectedRouteId) return false;
     if (state.onlyMoving && v.status !== 'In transito') return false;
     return matchesQuery([v.line, v.label, v.headsign, v.status], tokens);
   });
 
-  if (tokens.length) {
+  if (state.location) {
+    filtered = filtered.map((v) => ({ ...v, distance: haversine(state.location, v) }));
+    filtered.sort((a, b) => {
+      if (tokens.length) {
+        const byRelevance = relevanceRank(a.line, tokens) - relevanceRank(b.line, tokens);
+        if (byRelevance !== 0) return byRelevance;
+      }
+      return a.distance - b.distance;
+    });
+  } else if (tokens.length) {
     filtered.sort(
       (a, b) =>
         relevanceRank(a.line, tokens) - relevanceRank(b.line, tokens) ||
@@ -491,6 +1336,7 @@ function renderList() {
         <span class="bus-main">
           <span class="bus-dest">${esc(v.headsign || 'Destinazione n.d.')}</span>
           <span class="bus-meta">
+            ${state.location ? `<span class="bus-distance">${esc(formatDistance(v.distance))}</span><span class="dot-sep"></span>` : ''}
             <span>vettura ${esc(v.label)}</span>
             <span class="dot-sep"></span>
             <span>${esc(timeAgo(v.timestamp))}</span>
@@ -693,6 +1539,76 @@ function bindEvents() {
     el.search.focus();
   });
 
+  el.locationInput.addEventListener('input', () => {
+    el.clearLocation.hidden = !el.locationInput.value;
+
+    if (!el.locationInput.value.trim()) {
+      if (state.location) clearLocation();
+      else {
+        suggestions = [];
+        closeSuggestions();
+      }
+      return;
+    }
+
+    clearTimeout(suggestionTimer);
+    suggestionTimer = setTimeout(() => fetchSuggestions(el.locationInput.value), 280);
+  });
+
+  el.locationInput.addEventListener('focus', () => {
+    if (suggestions.length && el.locationInput.value.trim().length >= 3) renderSuggestions();
+  });
+
+  el.locationInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeSuggestions();
+      return;
+    }
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!suggestions.length || el.locationSuggestions.hidden) return;
+      event.preventDefault();
+      if (event.key === 'ArrowDown') {
+        activeSuggestion = (activeSuggestion + 1) % suggestions.length;
+      } else {
+        activeSuggestion = activeSuggestion <= 0 ? suggestions.length - 1 : activeSuggestion - 1;
+      }
+      renderSuggestions();
+      el.locationSuggestions.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+
+    if (event.key === 'Enter') {
+      if (!suggestions.length || el.locationSuggestions.hidden) return;
+      event.preventDefault();
+      const place = suggestions[activeSuggestion >= 0 ? activeSuggestion : 0];
+      if (place) setLocation(place);
+    }
+  });
+
+  el.locationInput.addEventListener('blur', () => {
+    window.setTimeout(closeSuggestions, 140);
+  });
+
+  el.locationSuggestions.addEventListener('pointerdown', (event) => event.preventDefault());
+
+  el.locationSuggestions.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-index]');
+    if (!option) return;
+    const place = suggestions[Number(option.dataset.index)];
+    if (place) setLocation(place);
+  });
+
+  el.locateBtn.addEventListener('click', locateMe);
+
+  el.currentPositionBtn.addEventListener('click', () => detectCurrentPosition());
+  el.currentPositionInput.addEventListener('click', () => detectCurrentPosition());
+  el.currentPositionInput.addEventListener('focus', () => el.currentPositionInput.blur());
+  el.clearLocation.addEventListener('click', () => {
+    clearLocation();
+    el.locationInput.focus();
+  });
+
   el.onlyMoving.addEventListener('change', () => {
     state.onlyMoving = el.onlyMoving.checked;
     renderList();
@@ -700,13 +1616,61 @@ function bindEvents() {
   });
 
   el.list.addEventListener('click', (event) => {
+    if (event.target.closest('#stopsRefresh')) {
+      loadNearbyStops();
+      return;
+    }
+    if (event.target.closest('#stopsLocate')) {
+      locateMe();
+      return;
+    }
+
     const busRow = event.target.closest('[data-vehicle]');
     if (busRow) {
       focusVehicle(busRow.dataset.vehicle);
       return;
     }
     const lineRow = event.target.closest('[data-route]');
-    if (lineRow) selectRoute(lineRow.dataset.route);
+    if (lineRow) {
+      selectRoute(lineRow.dataset.route);
+      return;
+    }
+    const stopRow = event.target.closest('[data-stop]');
+    if (stopRow) focusStop(stopRow.dataset.stop);
+  });
+
+  el.nearbyBtn.addEventListener('click', () => {
+    if (state.tab === 'stops') {
+      state.tab = 'vehicles';
+      syncTabs();
+      renderList();
+      return;
+    }
+    openNearby();
+  });
+
+  // Le tendine native su mobile emettono anche `input`: aggiorniamo il raggio
+  // solo quando cambia davvero, per non ripetere la richiesta due volte.
+  const onRadiusChange = (event) => {
+    if (event.target.id !== 'stopsRadius') return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value) || value === state.stopsRadius) return;
+    state.stopsRadius = value;
+    saveRadius(value);
+    loadNearbyStops();
+  };
+  el.list.addEventListener('change', onRadiusChange);
+  el.list.addEventListener('input', onRadiusChange);
+
+  map.on('popupopen', (event) => {
+    const button = event.popup.getElement()?.querySelector('[data-stop-focus]');
+    if (!button) return;
+    button.addEventListener('click', () => {
+      map.closePopup();
+      state.tab = 'stops';
+      syncTabs();
+      focusStop(button.dataset.stopFocus);
+    });
   });
 
   el.clearSelection.addEventListener('click', clearRouteSelection);
@@ -732,9 +1696,13 @@ async function boot() {
 
   initMap();
   bindEvents();
+  loadSavedRadius();
   syncTabs();
   setInterval(tick, 1000);
   tick();
+  applySavedLocation();
+  renderCurrentPosition();
+  detectCurrentPosition({ silent: true });
 
   await Promise.all([loadData(), loadRoutes()]);
   state.nextRefreshAt = Date.now() + REFRESH_MS;

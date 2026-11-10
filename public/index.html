@@ -84,6 +84,9 @@
           <button class="tab" data-tab="lines" role="tab" aria-selected="false">
             Linee <span class="tab-count" id="tabLineCount">0</span>
           </button>
+          <button class="tab" data-tab="stops" role="tab" aria-selected="false">
+            Fermate <span class="tab-count" id="tabStopCount">0</span>
+          </button>
         </div>
 
         <div class="sidebar-tools">
@@ -120,6 +123,73 @@
           <button class="selection-clear" id="clearSelection" type="button" aria-label="Rimuovi filtro linea">×</button>
         </div>
 
+        <div class="location">
+          <div class="location-field" id="locationField">
+            <svg class="location-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+              <circle cx="12" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="2"/>
+            </svg>
+            <input
+              id="locationInput"
+              type="text"
+              placeholder="Cerca la tua posizione…"
+              autocomplete="off"
+              spellcheck="false"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="false"
+              aria-controls="locationSuggestions"
+              aria-label="Cerca la tua posizione"
+            />
+            <button class="location-locate" id="locateBtn" type="button" title="Usa la posizione attuale" aria-label="Usa la posizione attuale">
+              <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>
+                <path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"
+                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="location-clear" id="clearLocation" type="button" aria-label="Rimuovi posizione" hidden>×</button>
+          </div>
+          <div class="location-suggestions" id="locationSuggestions" role="listbox" aria-label="Suggerimenti posizione" hidden></div>
+        </div>
+
+        <div class="current-position">
+          <div class="current-position-head">
+            <span class="current-position-label">La tua posizione attuale</span>
+            <span class="current-position-badge" id="currentPositionBadge" data-state="idle">non rilevata</span>
+          </div>
+          <div class="location-field current-position-field" id="currentPositionField">
+            <svg class="location-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <input
+              id="currentPositionInput"
+              type="text"
+              value="Posizione non rilevata"
+              readonly
+              aria-label="La tua posizione attuale"
+              aria-live="polite"
+              title="Rileva la posizione del browser"
+            />
+            <button class="location-locate" id="currentPositionBtn" type="button"
+              title="Rileva la mia posizione attuale" aria-label="Rileva la mia posizione attuale">
+              <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+                <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"
+                  fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="current-position-coords" id="currentPositionCoords"></div>
+          <div class="current-position-place" id="currentPositionPlace" hidden>
+            <span class="current-position-place-name" id="currentPositionPlaceName"></span>
+            <span class="current-position-place-detail" id="currentPositionPlaceDetail"></span>
+          </div>
+        </div>
+
         <div class="list-header">
           <span id="listTitle">Tutti gli autobus</span>
           <span class="list-count" id="listCount">0</span>
@@ -154,6 +224,14 @@
               />
             </svg>
             Inquadra tutti
+          </button>
+          <button class="btn" id="nearbyBtn" type="button" title="Fermate vicine e prossimi passaggi">
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+              <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+              <circle cx="12" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="2" />
+            </svg>
+            Fermate vicine
           </button>
           <button class="btn" id="toggleShape" type="button" hidden>
             <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
