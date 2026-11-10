@@ -124,6 +124,7 @@
         </div>
 
         <div class="location">
+          <label class="location-label" for="locationInput">Dove vuoi andare</label>
           <div class="location-field" id="locationField">
             <svg class="location-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
               <path d="M12 21s7-5.7 7-11a7 7 0 1 0-14 0c0 5.3 7 11 7 11Z"
@@ -133,14 +134,13 @@
             <input
               id="locationInput"
               type="text"
-              placeholder="Cerca la tua posizione…"
+              placeholder="Cerca un indirizzo, una via, un luogo…"
               autocomplete="off"
               spellcheck="false"
               role="combobox"
               aria-autocomplete="list"
               aria-expanded="false"
               aria-controls="locationSuggestions"
-              aria-label="Cerca la tua posizione"
             />
             <button class="location-locate" id="locateBtn" type="button" title="Usa la posizione attuale" aria-label="Usa la posizione attuale">
               <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
