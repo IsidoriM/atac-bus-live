@@ -304,6 +304,104 @@
 
         <div class="toast" id="toast" role="status" hidden></div>
 
+        <!-- Vista di viaggio: pannello laterale + mappa, come la schermata
+             di indicazioni di Google Maps -->
+        <section class="trip-view" id="tripView" aria-label="Vista di viaggio" hidden>
+          <aside class="trip-panel">
+            <div class="trip-panel-head">
+              <button class="trip-back" id="tripBack" type="button" title="Torna alla mappa" aria-label="Torna alla mappa">
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                  <path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div class="trip-panel-fields">
+                <label class="trip-field" for="tripFromInput">
+                  <span class="trip-field-dot" data-kind="from" aria-hidden="true"></span>
+                  <input id="tripFromInput" type="text" value="La tua posizione" readonly
+                    aria-label="Partenza" />
+                </label>
+                <label class="trip-field" for="tripToInput">
+                  <span class="trip-field-dot" data-kind="to" aria-hidden="true"></span>
+                  <input id="tripToInput" type="text" placeholder="Scegli una destinazione" readonly
+                    aria-label="Destinazione" />
+                </label>
+              </div>
+              <button class="trip-close" id="tripViewClose" type="button" aria-label="Chiudi la vista di viaggio">×</button>
+            </div>
+
+            <div class="trip-modes" role="tablist" aria-label="Mezzo di trasporto">
+              <button class="trip-mode is-active" type="button" data-trip-mode="transit" role="tab" aria-selected="true">
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                  <path d="M6 17h12M7 17V7a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v10M9 17v3M15 17v3M7 9h10"
+                    fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                </svg>
+                Bus
+              </button>
+              <button class="trip-mode" type="button" data-trip-mode="walk" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                  <circle cx="13" cy="4.5" r="1.8" fill="currentColor"/>
+                  <path d="M12 8l-2 5 3 2 1 5M10 13l-3 3M13 10l3 2 2 4"
+                    fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                A piedi
+              </button>
+            </div>
+
+            <div class="trip-panel-body">
+              <div class="trip-stats">
+                <div class="trip-stat">
+                  <strong id="tripDistance">—</strong>
+                  <span>distanza</span>
+                </div>
+                <div class="trip-stat">
+                  <strong id="tripDuration">—</strong>
+                  <span>tempo</span>
+                </div>
+                <div class="trip-stat">
+                  <strong id="tripArrival">—</strong>
+                  <span>arrivo</span>
+                </div>
+              </div>
+
+              <div class="trip-section">
+                <h3 class="trip-section-title">Alternative di viaggio</h3>
+                <div class="trip-options" id="tripOptions"></div>
+              </div>
+
+              <div class="trip-section">
+                <h3 class="trip-section-title">Il tuo percorso</h3>
+                <ol class="trip-steps" id="tripSteps"></ol>
+              </div>
+
+              <div class="trip-section">
+                <h3 class="trip-section-title">Autobus lungo il percorso</h3>
+                <div class="trip-buses" id="tripBuses">
+                  <span class="trip-empty">Cerco le linee che passano di qui…</span>
+                </div>
+              </div>
+
+              <div class="trip-section">
+                <h3 class="trip-section-title">Indicazioni stradali</h3>
+                <ol class="trip-directions" id="tripDirections"></ol>
+              </div>
+
+              <footer class="trip-foot">
+                <span id="tripNote">Calcolato ora</span>
+                <button class="btn btn-small" id="tripCenter" type="button">Centra sulla mappa</button>
+              </footer>
+            </div>
+          </aside>
+
+          <div class="trip-map">
+            <div id="tripMap"></div>
+            <div class="trip-map-toolbar">
+              <span class="trip-map-title" id="tripMapTitle">Percorso</span>
+              <button class="btn btn-small" id="tripFit" type="button">Inquadra</button>
+            </div>
+          </div>
+        </section>
+
         <aside class="trip-report" id="tripReport" aria-label="Report del percorso" hidden>
           <header class="trip-head">
             <div class="trip-head-main">

@@ -36,6 +36,11 @@ const state = {
   tripOptions: [],
   tripMode: null,
   tripOpen: false,
+  tripViewOpen: false,
+  tripTransport: 'transit',
+  tripMap: null,
+  tripRouteLayer: null,
+  tripPointLayer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -69,6 +74,15 @@ const el = {
   tripDistance: $('tripDistance'),
   tripDuration: $('tripDuration'),
   tripArrival: $('tripArrival'),
+  tripView: $('tripView'),
+  tripFromInput: $('tripFromInput'),
+  tripToInput: $('tripToInput'),
+  tripBack: $('tripBack'),
+  tripViewClose: $('tripViewClose'),
+  tripMapEl: $('tripMap'),
+  tripMapTitle: $('tripMapTitle'),
+  tripFit: $('tripFit'),
+  tripDirections: $('tripDirections'),
   tripOptions: $('tripOptions'),
   tripSteps: $('tripSteps'),
   tripBuses: $('tripBuses'),
@@ -1429,7 +1443,8 @@ function clearRoute({ keepSummary = false } = {}) {
   state.tripOptions = [];
   ensureRouteLayer().clearLayers();
   if (!keepSummary) renderRouteSummary();
-  if (state.tripOpen) closeTripReport();
+  if (state.tripViewOpen) closeTripView();
+  else if (state.tripOpen) closeTripReport();
 }
 
 /**
@@ -1776,6 +1791,7 @@ function renderTripOptions() {
     .join('');
 
   renderTripLegs();
+  if (state.tripViewOpen) renderTripMap();
 }
 
 /** Tappe dell'alternativa selezionata. */
@@ -1843,6 +1859,203 @@ function renderTripStats() {
   el.tripArrival.textContent = timeRome(new Date(option.arriveAt)).slice(0, 5);
 }
 
+/* ---------- vista di viaggio (schermata indicazioni) ---------- */
+
+const TRIP_MAP_TILES = MAP_STYLES.osm.layers[0];
+
+/** Crea la mappa dedicata della vista di viaggio (una sola volta). */
+function ensureTripMap() {
+  if (state.tripMap) return state.tripMap;
+  if (typeof L === 'undefined' || !el.tripMapEl) return null;
+
+  const tripMap = L.map(el.tripMapEl, {
+    zoomControl: false,
+    preferCanvas: true,
+    minZoom: 10,
+    maxZoom: 19,
+    attributionControl: true,
+  }).setView([41.9, 12.51], 13);
+
+  L.tileLayer(TRIP_MAP_TILES.url, TRIP_MAP_TILES.options).addTo(tripMap);
+  L.control.zoom({ position: 'bottomright' }).addTo(tripMap);
+
+  state.tripMap = tripMap;
+  state.tripRouteLayer = L.layerGroup().addTo(tripMap);
+  state.tripPointLayer = L.layerGroup().addTo(tripMap);
+  return tripMap;
+}
+
+/** Disegna percorso, partenza, arrivo e fermate dell'alternativa scelta. */
+function renderTripMap() {
+  const tripMap = ensureTripMap();
+  const route = state.route;
+  if (!tripMap || !route?.points?.length) return;
+
+  state.tripRouteLayer.clearLayers();
+  state.tripPointLayer.clearLayers();
+
+  const points = route.points;
+
+  L.polyline(points, {
+    color: '#ffffff',
+    weight: 10,
+    opacity: 0.6,
+    lineCap: 'round',
+    lineJoin: 'round',
+    interactive: false,
+  }).addTo(state.tripRouteLayer);
+
+  L.polyline(points, {
+    color: ROUTE_COLOR,
+    weight: 6,
+    opacity: 0.95,
+    lineCap: 'round',
+    lineJoin: 'round',
+    interactive: false,
+  }).addTo(state.tripRouteLayer);
+
+  const start = points[0];
+  const end = points[points.length - 1];
+
+  L.circleMarker(start, {
+    radius: 8,
+    color: '#ffffff',
+    weight: 2.5,
+    fillColor: ROUTE_COLOR,
+    fillOpacity: 1,
+  })
+    .addTo(state.tripPointLayer)
+    .bindTooltip(`Partenza · ${esc(destinationLabel())}`, {
+      className: 'bus-tooltip',
+      direction: 'top',
+      offset: [0, -10],
+    });
+
+  L.circleMarker(end, {
+    radius: 8,
+    color: '#ffffff',
+    weight: 2.5,
+    fillColor: '#38d47f',
+    fillOpacity: 1,
+  })
+    .addTo(state.tripPointLayer)
+    .bindTooltip(`Arrivo · ${esc(state.gps?.label || state.location?.label || 'posizione attuale')}`, {
+      className: 'bus-tooltip',
+      direction: 'top',
+      offset: [0, -10],
+    });
+
+  // Fermate utili dell'alternativa selezionata.
+  const option = (state.tripOptions || []).find((o) => o.id === state.tripMode);
+  const wantedStops = new Set();
+  for (const leg of option?.legs || []) {
+    if (leg.stopName) wantedStops.add(leg.stopName);
+  }
+
+  for (const stop of state.routeStops || []) {
+    if (wantedStops.size && !wantedStops.has(stop.name)) continue;
+    L.marker([stop.lat, stop.lon], { icon: stopIcon(stop), keyboard: false, title: stop.name })
+      .addTo(state.tripPointLayer)
+      .bindTooltip(esc(stop.name), {
+        className: 'bus-tooltip',
+        direction: 'top',
+        offset: [0, -8],
+      });
+  }
+
+  tripMap.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 16 });
+  el.tripMapTitle.textContent = `${destinationLabel()} → ${state.gps?.label || state.location?.label || 'posizione attuale'}`;
+}
+
+/** Indicazioni stradali testuali, come il passo-passo di una navigazione. */
+function renderTripDirections() {
+  const route = state.route;
+  if (!route) {
+    el.tripDirections.innerHTML = '';
+    return;
+  }
+
+  const steps = route.steps || [];
+  if (!steps.length) {
+    el.tripDirections.innerHTML =
+      '<li class="trip-direction trip-empty">Indicazioni non disponibili per questo tragitto.</li>';
+    return;
+  }
+
+  const arrows = {
+    depart: '↑',
+    arrive: '⚑',
+    turn: '↱',
+    'new name': '↑',
+    continue: '↑',
+    merge: '⤳',
+    'fork': '⑂',
+    'end of road': '↰',
+    roundabout: '↻',
+    rotary: '↻',
+    'on ramp': '⤴',
+    'off ramp': '⤵',
+  };
+
+  el.tripDirections.innerHTML = steps
+    .map((step) => {
+      const arrow = arrows[step.type] || '↑';
+      const name = step.name ? esc(step.name) : 'Via senza nome';
+      const detail = step.distance
+        ? `${formatDistance(step.distance)} · ${formatDuration(step.duration)}`
+        : 'arrivo';
+      return `
+        <li class="trip-direction">
+          <span class="trip-direction-icon" aria-hidden="true">${arrow}</span>
+          <span class="trip-direction-main">
+            <strong>${name}</strong>
+            <span>${detail}</span>
+          </span>
+        </li>`;
+    })
+    .join('');
+}
+
+/** Mostra la schermata di viaggio (pannello + mappa dedicata). */
+function openTripView() {
+  if (!state.route) {
+    showToast('Scegli prima una destinazione in «Dove vuoi andare».');
+    return;
+  }
+
+  state.tripViewOpen = true;
+  el.tripView.hidden = false;
+  document.body.classList.add('trip-view-open');
+
+  el.tripFromInput.value = destinationLabel();
+  el.tripToInput.value = state.gps?.label || state.location?.label || 'Posizione attuale';
+
+  renderTripDirections();
+
+  // La mappa va inizializzata dopo che il contenitore è visibile e con le
+  // dimensioni definitive: qualche frame di attesa evita tile neri.
+  const refreshTripMap = (attempt = 0) => {
+    const tripMap = ensureTripMap();
+    if (!tripMap) return;
+    tripMap.invalidateSize();
+    renderTripMap();
+    if (attempt < 3) {
+      window.setTimeout(() => refreshTripMap(attempt + 1), 120 * (attempt + 1));
+    }
+  };
+  window.requestAnimationFrame(() => refreshTripMap());
+
+  openTripReport();
+}
+
+function closeTripView() {
+  state.tripViewOpen = false;
+  el.tripView.hidden = true;
+  document.body.classList.remove('trip-view-open');
+  closeTripReport();
+  if (state.tripMap) window.setTimeout(() => state.tripMap.invalidateSize(), 60);
+}
+
 /** Apre il pannello con il report di viaggio completo. */
 async function openTripReport() {
   const route = state.route;
@@ -1852,7 +2065,8 @@ async function openTripReport() {
   }
 
   state.tripOpen = true;
-  el.tripReport.hidden = false;
+  // Nella vista di viaggio i dati stanno nel pannello sinistro dedicato.
+  el.tripReport.hidden = state.tripViewOpen;
   el.routeOpen?.classList.add('is-active');
 
   el.tripRoute.textContent = `${destinationLabel()} → ${state.gps?.label || state.location?.label || 'posizione attuale'}`;
@@ -1893,6 +2107,7 @@ async function openTripReport() {
   renderTripOptions();
   renderTripStats();
   renderTripBuses();
+  if (state.tripViewOpen) renderTripMap();
 }
 
 function closeTripReport() {
@@ -2404,8 +2619,28 @@ function bindEvents() {
   });
 
   el.routeOpen?.addEventListener('click', () => {
-    if (state.tripOpen) closeTripReport();
-    else openTripReport();
+    if (state.tripViewOpen) closeTripView();
+    else openTripView();
+  });
+
+  el.tripBack?.addEventListener('click', closeTripView);
+  el.tripViewClose?.addEventListener('click', closeTripView);
+
+  el.tripFit?.addEventListener('click', () => {
+    if (!state.tripMap || !state.route?.points?.length) return;
+    state.tripMap.fitBounds(L.latLngBounds(state.route.points), { padding: [40, 40], maxZoom: 16 });
+  });
+
+  document.querySelectorAll('.trip-mode').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.tripTransport = button.dataset.tripMode;
+      document.querySelectorAll('.trip-mode').forEach((other) => {
+        const active = other === button;
+        other.classList.toggle('is-active', active);
+        other.setAttribute('aria-selected', String(active));
+      });
+      renderTripOptions();
+    });
   });
 
   el.tripOptions?.addEventListener('click', (event) => {
@@ -2415,12 +2650,17 @@ function bindEvents() {
     saveTripMode(state.tripMode);
     renderTripOptions();
     renderTripStats();
+    if (state.tripViewOpen) renderTripMap();
   });
 
   el.tripClose?.addEventListener('click', closeTripReport);
 
   el.tripCenter?.addEventListener('click', () => {
     if (!state.route?.points?.length) return;
+    if (state.tripViewOpen && state.tripMap) {
+      state.tripMap.fitBounds(L.latLngBounds(state.route.points), { padding: [40, 40], maxZoom: 16 });
+      return;
+    }
     map.fitBounds(L.latLngBounds(state.route.points), { padding: [56, 56], maxZoom: 16 });
   });
 
@@ -2526,7 +2766,14 @@ function bindEvents() {
     drawShape();
   });
 
-  window.addEventListener('resize', () => map.invalidateSize());
+  window.addEventListener('resize', () => {
+    map.invalidateSize();
+    if (state.tripViewOpen && state.tripMap) state.tripMap.invalidateSize();
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.tripViewOpen) closeTripView();
+  });
 }
 
 /* ---------- boot ---------- */
