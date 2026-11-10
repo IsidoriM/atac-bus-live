@@ -29,6 +29,7 @@ const state = {
   stopsSchedule: null,
   selectedStopId: null,
   stopMarkers: new Map(),
+  mapStyle: 'voyager',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -71,6 +72,7 @@ const el = {
   footCount: $('footCount'),
   fitBtn: $('fitBtn'),
   nearbyBtn: $('nearbyBtn'),
+  mapStyle: document.querySelector('.map-style'),
   toggleShape: $('toggleShape'),
   toggleShapeText: $('toggleShapeText'),
   mapStatus: $('mapStatus'),
@@ -170,6 +172,108 @@ let markers = new Map();
 let markerLayer = null;
 let shapeLayer = null;
 
+const MAP_STYLE_KEY = 'atac-bus-live.map-style';
+
+const MAP_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>';
+
+/**
+ * Stili della mappa. `voyager` è la mappa stradale chiara (simile a Google
+ * Maps), `satellite` usa le foto aeree Esri, `dark` è la mappa notturna.
+ */
+const MAP_STYLES = {
+  voyager: {
+    label: 'Stradale',
+    layers: [
+      {
+        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        options: {
+          subdomains: 'abcd',
+          maxZoom: 20,
+          attribution: `${MAP_ATTRIBUTION} &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>`,
+        },
+      },
+    ],
+  },
+  satellite: {
+    label: 'Satellite',
+    layers: [
+      {
+        url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        options: {
+          maxZoom: 19,
+          attribution: `Foto aeree &copy; <a href="https://www.esri.com/" target="_blank" rel="noreferrer">Esri</a>, Maxar, Earthstar Geographics · ${MAP_ATTRIBUTION}`,
+        },
+      },
+      {
+        // Etichette e nomi delle strade sopra le foto aeree.
+        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png',
+        options: {
+          subdomains: 'abcd',
+          maxZoom: 20,
+          attribution: '&copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>',
+        },
+      },
+    ],
+  },
+  dark: {
+    label: 'Scura',
+    layers: [
+      {
+        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        options: {
+          subdomains: 'abcd',
+          maxZoom: 20,
+          attribution: `${MAP_ATTRIBUTION} &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>`,
+        },
+      },
+    ],
+  },
+};
+
+let tileLayers = [];
+
+function loadSavedMapStyle() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(MAP_STYLE_KEY);
+  } catch {
+    saved = null;
+  }
+  state.mapStyle = saved && MAP_STYLES[saved] ? saved : 'voyager';
+}
+
+function saveMapStyle(style) {
+  try {
+    localStorage.setItem(MAP_STYLE_KEY, style);
+  } catch {
+    /* storage non disponibile */
+  }
+}
+
+/** Sostituisce i tile della mappa con quelli dello stile richiesto. */
+function applyMapStyle(style, { save = true } = {}) {
+  const config = MAP_STYLES[style] ? style : 'voyager';
+  state.mapStyle = config;
+  if (save) saveMapStyle(config);
+  if (!map) return;
+
+  for (const layer of tileLayers) layer.remove();
+  tileLayers = MAP_STYLES[config].layers.map(({ url, options }) =>
+    L.tileLayer(url, { ...options, detectRetina: false }).addTo(map),
+  );
+
+  // I tile nuovi vanno sotto marker e tracciati.
+  for (const layer of tileLayers) layer.bringToBack();
+
+  document.documentElement.dataset.mapStyle = config;
+  document.querySelectorAll('.map-style-btn').forEach((button) => {
+    const active = button.dataset.style === config;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
 function initMap() {
   markerLayer = L.layerGroup();
   shapeLayer = L.layerGroup();
@@ -178,16 +282,12 @@ function initMap() {
     zoomControl: false,
     preferCanvas: true,
     minZoom: 10,
-    maxZoom: 18,
+    maxZoom: 20,
     attributionControl: true,
   }).setView([41.9, 12.51], 12);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 20,
-  }).addTo(map);
+  loadSavedMapStyle();
+  applyMapStyle(state.mapStyle, { save: false });
 
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
@@ -1637,6 +1737,12 @@ function bindEvents() {
     }
     const stopRow = event.target.closest('[data-stop]');
     if (stopRow) focusStop(stopRow.dataset.stop);
+  });
+
+  el.mapStyle?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-style]');
+    if (!button) return;
+    applyMapStyle(button.dataset.style);
   });
 
   el.nearbyBtn.addEventListener('click', () => {
