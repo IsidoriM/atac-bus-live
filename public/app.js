@@ -19,6 +19,7 @@ const state = {
   shapes: new Map(),
   shapesVisible: true,
   location: null,
+  destination: null,
   gps: null,
   gpsState: 'idle',
   stops: [],
@@ -29,7 +30,8 @@ const state = {
   stopsSchedule: null,
   selectedStopId: null,
   stopMarkers: new Map(),
-  mapStyle: 'voyager',
+  mapStyle: 'osm',
+  route: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -57,6 +59,9 @@ const el = {
   currentPositionBtn: $('currentPositionBtn'),
   currentPositionBadge: $('currentPositionBadge'),
   currentPositionCoords: $('currentPositionCoords'),
+  routeSummary: $('routeSummary'),
+  routeText: $('routeText'),
+  routeClear: $('routeClear'),
   currentPositionPlace: $('currentPositionPlace'),
   currentPositionPlaceName: $('currentPositionPlaceName'),
   currentPositionPlaceDetail: $('currentPositionPlaceDetail'),
@@ -178,12 +183,29 @@ const MAP_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>';
 
 /**
- * Stili della mappa. `voyager` è la mappa stradale chiara (simile a Google
- * Maps), `satellite` usa le foto aeree Esri, `dark` è la mappa notturna.
+ * Stili della mappa.
+ * - `osm` (predefinito): tile standard OpenStreetMap, mappa stradale chiara
+ *   senza watermark.
+ * - `voyager`: CARTO Voyager, resa ancora più vicina a una mappa stradale
+ *   commerciale (richiede una chiave CARTO per l'uso senza watermark).
+ * - `satellite`: foto aeree Esri con etichette CARTO.
+ * - `dark`: mappa notturna.
  */
 const MAP_STYLES = {
-  voyager: {
+  osm: {
     label: 'Stradale',
+    layers: [
+      {
+        url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        options: {
+          maxZoom: 19,
+          attribution: `${MAP_ATTRIBUTION} contributors`,
+        },
+      },
+    ],
+  },
+  voyager: {
+    label: 'Stradale+',
     layers: [
       {
         url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
@@ -240,7 +262,7 @@ function loadSavedMapStyle() {
   } catch {
     saved = null;
   }
-  state.mapStyle = saved && MAP_STYLES[saved] ? saved : 'voyager';
+  state.mapStyle = saved && MAP_STYLES[saved] ? saved : 'osm';
 }
 
 function saveMapStyle(style) {
@@ -253,7 +275,7 @@ function saveMapStyle(style) {
 
 /** Sostituisce i tile della mappa con quelli dello stile richiesto. */
 function applyMapStyle(style, { save = true } = {}) {
-  const config = MAP_STYLES[style] ? style : 'voyager';
+  const config = MAP_STYLES[style] ? style : 'osm';
   state.mapStyle = config;
   if (save) saveMapStyle(config);
   if (!map) return;
@@ -471,8 +493,22 @@ function placeFromFeature(feature) {
     title,
     street: p.street || (p.osm_key === 'highway' ? p.name : '') || '',
     detail: detailParts.join(' · '),
+    // "Via Nazionale, Roma": il nome da solo basta se è già una via.
     label: [title, p.city && p.city !== title ? p.city : ''].filter(Boolean).join(', '),
   };
+}
+
+/** Scarta i risultati ripetuti (stesso nome e coordinate quasi identiche). */
+function dedupePlaces(places) {
+  const seen = new Set();
+  const out = [];
+  for (const place of places) {
+    const key = `${normalize(place.title)}|${place.lat.toFixed(3)}|${place.lon.toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(place);
+  }
+  return out;
 }
 
 function closeSuggestions() {
@@ -533,6 +569,7 @@ async function fetchSuggestions(query) {
   url.searchParams.set('lat', String(ROME_CENTER.lat));
   url.searchParams.set('lon', String(ROME_CENTER.lon));
   url.searchParams.set('bbox', ROME_BBOX);
+  url.searchParams.set('zoom', '12');
 
   try {
     const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
@@ -540,7 +577,9 @@ async function fetchSuggestions(query) {
     const data = await res.json();
     if (controller.signal.aborted) return;
 
-    suggestions = (data.features || []).map(placeFromFeature).filter(Boolean).slice(0, 7);
+    suggestions = dedupePlaces(
+      (data.features || []).map(placeFromFeature).filter(Boolean),
+    ).slice(0, 7);
     activeSuggestion = -1;
     if (document.activeElement === el.locationInput) renderSuggestions();
     else closeSuggestions();
@@ -552,6 +591,36 @@ async function fetchSuggestions(query) {
         '<div class="location-empty">Ricerca non disponibile, riprova tra poco</div>';
       el.locationSuggestions.hidden = false;
     }
+  }
+}
+
+/** Cerca il testo scritto a mano e lo usa come destinazione. */
+async function resolveTypedDestination(text) {
+  const term = String(text || '').trim();
+  if (term.length < 3) return;
+
+  const url = new URL(GEOCODE_ENDPOINT);
+  url.searchParams.set('q', term);
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('lat', String(ROME_CENTER.lat));
+  url.searchParams.set('lon', String(ROME_CENTER.lon));
+  url.searchParams.set('bbox', ROME_BBOX);
+  url.searchParams.set('zoom', '12');
+
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const place = dedupePlaces(
+      (data.features || []).map(placeFromFeature).filter(Boolean),
+    )[0];
+    if (!place) {
+      showToast('Nessun risultato per questa destinazione.');
+      return;
+    }
+    setDestination(place);
+  } catch {
+    showToast('Ricerca della destinazione non disponibile, riprova.');
   }
 }
 
@@ -736,6 +805,43 @@ function detectCurrentPosition({ silent = false } = {}) {
   );
 }
 
+let destinationMarker = null;
+
+/** Marker della destinazione scelta in "Dove vuoi andare". */
+function renderDestinationMarker() {
+  const dest = state.destination;
+  if (!dest) {
+    if (destinationMarker) {
+      destinationMarker.remove();
+      destinationMarker = null;
+    }
+    return;
+  }
+
+  const latlng = [dest.lat, dest.lon];
+  if (!destinationMarker) {
+    destinationMarker = L.circleMarker(latlng, {
+      radius: 8,
+      color: '#ffffff',
+      weight: 2.5,
+      opacity: 1,
+      fillColor: '#2f6bff',
+      fillOpacity: 1,
+      className: 'destination-marker',
+    })
+      .addTo(map)
+      .bindTooltip('Destinazione', {
+        className: 'bus-tooltip',
+        direction: 'top',
+        offset: [0, -10],
+        opacity: 1,
+      });
+  } else {
+    destinationMarker.setLatLng(latlng);
+  }
+  destinationMarker.bringToFront();
+}
+
 function renderLocationMarker() {
   if (!state.location) {
     if (locationMarker) {
@@ -776,13 +882,15 @@ function setLocation(place, { fly = true, save = true } = {}) {
     label: place.label || place.title || 'Posizione',
   };
 
-  el.locationInput.value = state.location.label;
-  el.locationField.classList.add('is-located');
+  // La posizione attuale vive nella sua casella: il campo "Dove vuoi andare"
+  // resta libero per la destinazione.
   el.clearLocation.hidden = false;
   el.locateBtn.classList.remove('is-loading');
   suggestions = [];
   closeSuggestions();
   renderLocationMarker();
+  renderDestinationMarker();
+  renderRouteSummary();
 
   if (save) {
     try {
@@ -795,7 +903,46 @@ function setLocation(place, { fly = true, save = true } = {}) {
   el.list.scrollTop = 0;
   invalidateStops();
   renderList();
+  if (state.destination) refreshRoute({ fit: false });
   if (fly) map.flyTo([place.lat, place.lon], Math.max(map.getZoom(), 15), { duration: 0.9 });
+}
+
+/** Imposta la destinazione da raggiungere e ne disegna il tragitto. */
+function setDestination(place, { fly = false } = {}) {
+  if (!place || !Number.isFinite(place.lat) || !Number.isFinite(place.lon)) return;
+
+  state.destination = {
+    lat: place.lat,
+    lon: place.lon,
+    label: place.label || place.title || 'Destinazione',
+  };
+
+  el.locationInput.value = state.destination.label;
+  el.locationField.classList.add('is-located');
+  el.clearLocation.hidden = false;
+  suggestions = [];
+  closeSuggestions();
+  renderDestinationMarker();
+  renderRouteSummary();
+
+  if (state.gps || state.location) {
+    drawRoute({ fit: !fly });
+  } else {
+    // Senza posizione attuale disegniamo almeno il punto di partenza.
+    renderRouteSummary();
+    if (fly) map.flyTo([place.lat, place.lon], Math.max(map.getZoom(), 14), { duration: 0.9 });
+  }
+}
+
+/** Rimuove la destinazione (e il tragitto) lasciando la posizione attuale. */
+function clearDestination() {
+  state.destination = null;
+  el.locationInput.value = '';
+  el.locationField.classList.remove('is-located');
+  suggestions = [];
+  closeSuggestions();
+  renderDestinationMarker();
+  clearRoute();
 }
 
 /** La posizione è cambiata: le fermate vicine non valgono più. */
@@ -853,6 +1000,7 @@ function clearLocation() {
   }
   invalidateStops();
   renderList();
+  clearRoute();
 }
 
 function restoreLocationLabel(previous) {
@@ -1205,6 +1353,146 @@ function openNearby() {
     return;
   }
   if (!state.stops.length && !state.stopsLoading) loadNearbyStops();
+}
+
+/* ---------- tragitto: dalla destinazione alla posizione attuale ---------- */
+
+const ROUTER_ENDPOINT = 'https://router.project-osrm.org/route/v1/foot';
+const ROUTE_COLOR = '#2f6bff';
+
+let routeLayer = null;
+let routeController = null;
+
+function ensureRouteLayer() {
+  if (!routeLayer) routeLayer = L.layerGroup().addTo(map);
+  return routeLayer;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return '';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 1) return 'meno di 1 min';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+/** Nome leggibile della destinazione scelta in "Dove vuoi andare". */
+function destinationLabel() {
+  if (state.destination?.label) return state.destination.label;
+  if (state.location?.label) return state.location.label;
+  return el.locationInput.value.trim();
+}
+
+/** Aggiorna la riga con distanza, durata e il pulsante per rimuovere il tragitto. */
+function renderRouteSummary() {
+  const route = state.route;
+  if (!route) {
+    el.routeSummary.hidden = true;
+    el.routeText.textContent = '';
+    return;
+  }
+
+  const parts = [];
+  if (Number.isFinite(route.distance)) parts.push(formatDistance(route.distance));
+  if (Number.isFinite(route.duration)) parts.push(formatDuration(route.duration));
+  const dest = destinationLabel();
+
+  el.routeSummary.hidden = false;
+  el.routeText.textContent = parts.length
+    ? `${parts.join(' · ')} fino a ${dest}`
+    : `Tragitto fino a ${dest}`;
+}
+
+function clearRoute({ keepSummary = false } = {}) {
+  routeController?.abort();
+  routeController = null;
+  state.route = null;
+  ensureRouteLayer().clearLayers();
+  if (!keepSummary) renderRouteSummary();
+}
+
+/**
+ * Disegna in blu il percorso dalla destinazione (campo "Dove vuoi andare")
+ * alla posizione attuale, usando il routing pedonale di OSRM.
+ */
+async function drawRoute({ fit = true } = {}) {
+  const from = state.destination;
+  const to = state.gps || state.location;
+
+  if (!from || !Number.isFinite(from.lat) || !Number.isFinite(from.lon)) return false;
+  if (!to || !Number.isFinite(to.lat) || !Number.isFinite(to.lon)) return false;
+
+  routeController?.abort();
+  const controller = new AbortController();
+  routeController = controller;
+
+  const url =
+    `${ROUTER_ENDPOINT}/${from.lon},${from.lat};${to.lon},${to.lat}` +
+    '?overview=full&geometries=geojson';
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (controller.signal.aborted) return false;
+
+    const best = (data.routes || [])[0];
+    if (!best?.geometry?.coordinates?.length) throw new Error('Percorso non trovato');
+
+    // GeoJSON è [lon, lat]: Leaflet vuole [lat, lon].
+    const points = best.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    const layer = ensureRouteLayer();
+    layer.clearLayers();
+
+    // Alone chiaro sotto la linea, così il blu resta leggibile su ogni mappa.
+    L.polyline(points, {
+      color: '#ffffff',
+      weight: 9,
+      opacity: 0.55,
+      lineCap: 'round',
+      lineJoin: 'round',
+      interactive: false,
+    }).addTo(layer);
+
+    const line = L.polyline(points, {
+      color: ROUTE_COLOR,
+      weight: 5,
+      opacity: 0.95,
+      lineCap: 'round',
+      lineJoin: 'round',
+      dashArray: null,
+      interactive: false,
+    }).addTo(layer);
+
+    state.route = {
+      distance: best.distance,
+      duration: best.duration,
+      from: { lat: from.lat, lon: from.lon },
+      to: { lat: to.lat, lon: to.lon },
+    };
+    renderRouteSummary();
+
+    if (fit) map.fitBounds(line.getBounds(), { padding: [56, 56], maxZoom: 16 });
+    return true;
+  } catch (err) {
+    if (err.name === 'AbortError') return false;
+    clearRoute();
+    showToast(`Tragitto non disponibile: ${err.message}`);
+    return false;
+  } finally {
+    if (routeController === controller) routeController = null;
+  }
+}
+
+/** Aggiorna il tragitto quando cambia la destinazione o la posizione attuale. */
+function refreshRoute({ fit = true } = {}) {
+  if (!state.destination) {
+    clearRoute();
+    return Promise.resolve(false);
+  }
+  return drawRoute({ fit });
 }
 
 /* ---------- route shapes ---------- */
@@ -1677,10 +1965,13 @@ function bindEvents() {
     }
 
     if (event.key === 'Enter') {
-      if (!suggestions.length || el.locationSuggestions.hidden) return;
       event.preventDefault();
-      const place = suggestions[activeSuggestion >= 0 ? activeSuggestion : 0];
-      if (place) setLocation(place);
+      if (suggestions.length && !el.locationSuggestions.hidden) {
+        const place = suggestions[activeSuggestion >= 0 ? activeSuggestion : 0];
+        if (place) setDestination(place);
+        return;
+      }
+      resolveTypedDestination(el.locationInput.value);
     }
   });
 
@@ -1694,7 +1985,12 @@ function bindEvents() {
     const option = event.target.closest('[data-index]');
     if (!option) return;
     const place = suggestions[Number(option.dataset.index)];
-    if (place) setLocation(place);
+    if (place) setDestination(place);
+  });
+
+  el.routeClear?.addEventListener('click', () => {
+    clearDestination();
+    showToast('Tragitto rimosso.');
   });
 
   el.locateBtn.addEventListener('click', locateMe);
@@ -1705,7 +2001,8 @@ function bindEvents() {
     detectCurrentPosition();
   });
   el.clearLocation.addEventListener('click', () => {
-    clearLocation();
+    if (state.destination) clearDestination();
+    else clearLocation();
     el.locationInput.focus();
   });
 

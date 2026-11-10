@@ -1815,19 +1815,23 @@ input:focus-visible {
 }
 
 /* Mappa chiara: i popup restano leggibili e i marker hanno più contrasto. */
+html[data-map-style='osm'],
 html[data-map-style='voyager'] .leaflet-tooltip.bus-tooltip {
   background: rgba(255, 255, 255, 0.96);
   color: #1b2430;
   border-color: rgba(20, 30, 45, 0.16);
 }
 
+html[data-map-style='osm'],
 html[data-map-style='voyager'] .legend,
+html[data-map-style='osm'],
 html[data-map-style='voyager'] .map-status {
   background: rgba(255, 255, 255, 0.92);
   border-color: rgba(20, 30, 45, 0.14);
   color: #43536a;
 }
 
+html[data-map-style='osm'],
 html[data-map-style='voyager'] .map-status strong {
   color: #16202c;
 }
@@ -1844,4 +1848,59 @@ html[data-map-style='voyager'] .map-status strong {
     width: 15px;
     height: 15px;
   }
+}
+
+/* ---------- Tragitto destinazione → posizione ---------- */
+
+.route-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 7px 8px 7px 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(47, 107, 255, 0.35);
+  background: rgba(47, 107, 255, 0.12);
+}
+
+.route-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2f6bff;
+  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.22);
+  flex: none;
+}
+
+.route-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: #bcd0ff;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.route-clear {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9fb6e6;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+
+.route-clear:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.destination-marker {
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
 }

@@ -181,6 +181,12 @@
             </button>
           </div>
           <div class="current-position-coords" id="currentPositionCoords"></div>
+          <div class="route-summary" id="routeSummary" hidden>
+            <span class="route-dot" aria-hidden="true"></span>
+            <span class="route-text" id="routeText">—</span>
+            <button class="route-clear" id="routeClear" type="button" title="Rimuovi il tragitto"
+              aria-label="Rimuovi il tragitto">×</button>
+          </div>
           <div class="current-position-place" id="currentPositionPlace" hidden>
             <span class="current-position-place-name" id="currentPositionPlaceName"></span>
             <span class="current-position-place-detail" id="currentPositionPlaceDetail"></span>
@@ -223,14 +229,22 @@
             Inquadra tutti
           </button>
           <div class="map-style" role="group" aria-label="Stile della mappa">
-            <button class="map-style-btn" type="button" data-style="voyager" aria-pressed="true"
-              title="Mappa chiara, stile mappa stradale">
+            <button class="map-style-btn" type="button" data-style="osm" aria-pressed="true"
+              title="Mappa stradale (OpenStreetMap)">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
                 <path d="M3 6.5 9 4l6 2.5L21 4v13.5L15 20l-6-2.5L3 20V6.5Z"
                   fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
                 <path d="M9 4v13.5M15 6.5V20" fill="none" stroke="currentColor" stroke-width="1.8"/>
               </svg>
               Stradale
+            </button>
+            <button class="map-style-btn" type="button" data-style="voyager" aria-pressed="false"
+              title="Mappa stradale ad alto contrasto (CARTO Voyager)">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                <path d="M4 20 9 4M14 20l3-9M3 14h7M13 9h7"
+                  fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+              Stradale+
             </button>
             <button class="map-style-btn" type="button" data-style="satellite" aria-pressed="false"
               title="Foto satellitare">
